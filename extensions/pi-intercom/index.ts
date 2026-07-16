@@ -952,6 +952,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       acknowledge: true,
     });
   });
+
+  pi.on("before_agent_start", async (event, _ctx) => {
+    if (!config.enabled) return;
+    return {
+      systemPrompt: event.systemPrompt + `\n\n<pi_intercom>\nCoordinate with other local pi sessions on related codebases. Use /skill:pi-intercom for patterns.\n\n- **When:** Same codebase (parallel work), reference codebase (consulting patterns), related repos (shared libraries).\n- **Not when:** Unrelated codebases, trivial questions, or when you can proceed independently.\n- **Principle:** Prefer \`send\` for notifications; \`ask\` only when blocked waiting for input.\n- **Namespace:** session name is grouped by namespace like <namespace>/<role>, when user ask to communicate to <role>, implies under the same current namespace.\n- **Async:** After send task to other session, do not actively poll session status, wait for intercom report/response from that session.\n</pi_intercom>`,
+    };
+  });
+
   pi.on("session_start", (_event, ctx) => {
     if (!config.enabled) {
       return;
