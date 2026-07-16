@@ -104,14 +104,14 @@ export class PromptSearchOverlay implements Component, Focusable {
 		const lines = [
 			this.border("top", width),
 			this.line(`${this.theme.fg("accent", this.theme.bold(` Search prompts - ${scopeLabel} `))}${this.theme.fg("dim", this.summary(prompts.length))}`, contentWidth),
-			this.line(this.theme.fg("borderMuted", "-".repeat(contentWidth)), contentWidth),
+			this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
 		];
 
 		if (contentWidth >= 78) lines.push(...this.renderWide(visiblePrompts, contentWidth));
 		else lines.push(...this.renderCompact(visiblePrompts, contentWidth));
 
 		lines.push(
-			this.line(this.theme.fg("borderMuted", "-".repeat(contentWidth)), contentWidth),
+			this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
 			this.line(this.renderSearch(contentWidth), contentWidth),
 			this.line(this.theme.fg("dim", "Up/Down navigate | Enter use | Esc cancel | Ctrl+S scope"), contentWidth),
 			this.border("bottom", width),
@@ -140,7 +140,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 				? this.renderPromptRow(prompt, absoluteIndex === this.selectedIndex, listWidth)
 				: "";
 			const previewLine = preview[index] ?? "";
-			lines.push(this.line(`${this.cell(list, listWidth)} ${this.theme.fg("borderMuted", "|")} ${this.cell(previewLine, previewWidth)}`, contentWidth));
+			lines.push(this.line(`${this.cell(list, listWidth)} ${this.theme.fg("borderMuted", "│")} ${this.cell(previewLine, previewWidth)}`, contentWidth));
 		}
 		return lines;
 	}
@@ -250,12 +250,13 @@ export class PromptSearchOverlay implements Component, Focusable {
 
 	private line(content: string, contentWidth: number): string {
 		const clipped = truncateToWidth(content, contentWidth, "...");
-		return this.theme.fg("border", "|") + clipped + " ".repeat(Math.max(0, contentWidth - visibleWidth(clipped))) + this.theme.fg("border", "|");
+		return this.theme.fg("border", "│") + clipped + " ".repeat(Math.max(0, contentWidth - visibleWidth(clipped))) + this.theme.fg("border", "│");
 	}
 
-	private border(_position: "top" | "bottom", width: number): string {
-		return this.theme.fg("border", "+" + "-".repeat(Math.max(0, width - 2)) + "+");
-	}
+	private border(position: "top" | "bottom", width: number): string {
+		const [left, right] = position === "top" ? ["╭", "╮"] : ["╰", "╯"];
+		return this.theme.fg("border", left + "─".repeat(Math.max(0, width - 2)) + right);
+}
 }
 
 function singleLine(text: string): string {
