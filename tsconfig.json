@@ -13,6 +13,7 @@
     "extensions/pi-execution-time",
     "extensions/pi-intercom",
     "extensions/pi-fast-mode",
+    "extensions/pi-search-prompts",
     "extensions/pi-inline-skill"
   ]
 }

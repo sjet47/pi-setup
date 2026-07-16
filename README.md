@@ -21,6 +21,7 @@ pi install git:github.com/sjet47/pi-setup@v0.1.0
 | `pi-execution-time/` | Show prompt execution time in the footer | [lukaspanni/pi-execution-time](https://github.com/lukaspanni/pi-execution-time) |
 | `pi-intercom/` | Session-to-session messaging and coordination | [repo/pi-intercom](https://github.com/sjet47/pi-intercom) |
 | `pi-fast-mode/` | Auto-detect fast mode (service_tier/speed) by model API format | [rewrite] |
+| `pi-search-prompts/` | Search current-session or global prompt history and prefill the editor | [local] |
 | `pi-inline-skill/` | Highlight `$skill` aliases and route inline skill references via `/skill:name` | [pi-inline-skill-identifier](https://github.com/kaushikgopal/pi-kaush/tree/main/extensions/pi-inline-skill-identifier) |
 
 ## Selective Loading
