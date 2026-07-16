@@ -1,0 +1,51 @@
+{
+  "name": "pi-execution-time",
+  "version": "0.2.0",
+  "description": "Pi extension that shows prompt execution time in the footer while the agent works.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lukaspanni/pi-execution-time.git"
+  },
+  "author": {
+    "name": "Lukas Panni",
+    "url": "https://github.com/lukaspanni"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "timer",
+    "execution-time"
+  ],
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run",
+    "validate": "npm test && npm run typecheck && npm run pack:check"
+  },
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.7",
+    "@earendil-works/pi-tui": "^0.80.7",
+    "@types/node": "^26.0.0",
+    "typescript": "^6.0.3"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/execution-time.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.4 <1",
+    "@earendil-works/pi-tui": "*"
+  }
+}
