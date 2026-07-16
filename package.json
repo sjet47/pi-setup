@@ -1,0 +1,22 @@
+{
+  "name": "pi-setup",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Personal Pi extension collection — a single source for all my custom plugins.",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.75.3",
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
