@@ -39,6 +39,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 	) {
 		this.searchInput.onSubmit = () => this.selectCurrent();
 		this.searchInput.onEscape = () => this.onDone();
+		this.selectNewest();
 	}
 
 	get focused(): boolean {
@@ -83,8 +84,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 		const before = this.searchInput.getValue();
 		this.searchInput.handleInput(data);
 		if (before !== this.searchInput.getValue()) {
-			this.selectedIndex = 0;
-			this.windowStart = 0;
+			this.selectNewest();
 			this.invalidate();
 		}
 	}
@@ -200,6 +200,11 @@ export class PromptSearchOverlay implements Component, Focusable {
 		return this.prompts()[this.selectedIndex];
 	}
 
+	private selectNewest(): void {
+		this.selectedIndex = Math.max(0, this.prompts().length - 1);
+		this.windowStart = Math.max(0, this.selectedIndex - VISIBLE_ROWS + 1);
+	}
+
 	private moveSelection(delta: number): void {
 		const prompts = this.prompts();
 		if (prompts.length === 0) return;
@@ -216,8 +221,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 
 	private toggleScope(): void {
 		this.scope = this.scope === "session" ? "global" : "session";
-		this.selectedIndex = 0;
-		this.windowStart = 0;
+		this.selectNewest();
 		this.invalidate();
 		this.requestRender();
 		if (this.scope !== "global" || this.globalEntries || this.globalLoading) return;
@@ -227,6 +231,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 			.then((entries) => {
 				this.globalEntries = entries;
 				this.globalError = undefined;
+				this.selectNewest();
 			})
 			.catch(() => {
 				this.globalError = "Could not load prompt history.";

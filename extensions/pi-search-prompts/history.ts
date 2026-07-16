@@ -69,5 +69,5 @@ function sortAndDedupe(prompts: PromptHistoryEntry[]): PromptHistoryEntry[] {
 		const existing = unique.get(key);
 		if (!existing || prompt.timestamp > existing.timestamp) unique.set(key, prompt);
 	}
-	return [...unique.values()].sort((left, right) => right.timestamp - left.timestamp);
+	return [...unique.values()].sort((left, right) => left.timestamp - right.timestamp);
 }
