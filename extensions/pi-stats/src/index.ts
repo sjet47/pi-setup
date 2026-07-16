@@ -67,7 +67,7 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 			notifyOnce(ctx, "write", `pi-skill-stats write failed: ${errorMessage(error)}`);
 		}
 	}
-	function recordTool(ctx: ExtensionContext, tool: string, originKey?: string) {
+	async function recordTool(ctx: ExtensionContext, tool: string, originKey?: string) {
 		const activeStore = await ensureStore(ctx);
 		if (!activeStore) return;
 		try {
@@ -78,13 +78,13 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	function flushPendingInputSkills(ctx: ExtensionContext) {
+	async function flushPendingInputSkills(ctx: ExtensionContext) {
 		if (pendingInputSkills.length === 0) return;
 		const skills = pendingInputSkills;
 		pendingInputSkills = [];
 		const origin = liveOrigin(ctx, "user");
 		for (const skill of skills) {
-			record(ctx, skill, origin ? skillOriginKey(origin.fileKey, origin.entryId, skill) : undefined);
+			await record(ctx, skill, origin ? skillOriginKey(origin.fileKey, origin.entryId, skill) : undefined);
 		}
 	}
 
