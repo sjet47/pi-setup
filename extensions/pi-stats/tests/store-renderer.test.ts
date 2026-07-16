@@ -100,8 +100,12 @@ function createFakeDatabase(columns: Array<{ name: string }> = [
 	return db;
 }
 
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
 async function createStore() {
-	const dir = await Bun.write(Bun.mkdtempSync("pi-stats-test-"), "");
+	const dir = mkdtempSync(join(tmpdir(), "pi-stats-test-"));
 	const store = await SQLiteSkillStatsStore.create(dir);
 	return { store, dir };
 }

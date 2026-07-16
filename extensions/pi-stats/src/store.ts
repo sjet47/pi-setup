@@ -55,9 +55,7 @@ let sqlInitPromise: Promise<SqlJsStatic> | null = null;
 
 async function getSqlModule(): Promise<SqlJsStatic> {
 	if (sqlModule) return sqlModule;
-	if (!sqlInitPromise) {
-		sqlInitPromise = initSqlJs();
-	}
+	if (!sqlInitPromise) sqlInitPromise = initSqlJs();
 	sqlModule = await sqlInitPromise;
 	return sqlModule;
 }
@@ -66,6 +64,7 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	private db: Database;
 	private dbPath: string;
 	private savePending = false;
+	private closed = false;
 
 	private constructor(db: Database, dbPath: string) {
 		this.db = db;
@@ -87,58 +86,9 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 			db = new SQL.Database();
 		}
 
-		// Initialize schema
-		db.run(`
-			create table if not exists skill_usage_events(
-				id integer primary key,
-				skill text not null,
-				project text not null,
-				created_at integer not null,
-				origin_key text
-			);
-		`);
-		db.run(`
-			create table if not exists tool_usage_events(
-				id integer primary key,
-				tool text not null,
-				project text not null,
-				created_at integer not null,
-				origin_key text
-			);
-		`);
-
-		// Migration: old source column
-		const columns = db.exec("pragma table_info(skill_usage_events)");
-		const colNames = (columns[0]?.values ?? []).map((row) => row[0] as string);
-		if (colNames.includes("source")) {
-			// Recreate and migrate from old schema
-			db.run(`
-				alter table skill_usage_events rename to skill_usage_events_v1;
-				create table skill_usage_events(
-					id integer primary key,
-					skill text not null,
-					project text not null,
-					created_at integer not null,
-					origin_key text
-				);
-				insert or ignore into skill_usage_events(id, skill, project, created_at, origin_key)
-				select id, skill, project, created_at, origin_key from skill_usage_events_v1;
-				drop table skill_usage_events_v1;
-			`);
-		}
-
-		// Create indexes
-		db.run("create index if not exists idx_skill_usage_project on skill_usage_events(project, skill)");
-		db.run("create index if not exists idx_skill_usage_skill on skill_usage_events(skill)");
-		db.run("create index if not exists idx_skill_usage_created_at on skill_usage_events(created_at)");
-		db.run("create unique index if not exists idx_skill_usage_origin_key on skill_usage_events(origin_key) where origin_key is not null");
-		db.run("create index if not exists idx_tool_usage_project on tool_usage_events(project, tool)");
-		db.run("create index if not exists idx_tool_usage_tool on tool_usage_events(tool)");
-		db.run("create index if not exists idx_tool_usage_created_at on tool_usage_events(created_at)");
-		db.run("create unique index if not exists idx_tool_usage_origin_key on tool_usage_events(origin_key) where origin_key is not null");
-
+		initializeSchema(db);
 		const store = new SqlJsSkillStatsStore(db, dbPath);
-		store.save();
+		store.saveSync();
 		return store;
 	}
 
@@ -207,11 +157,11 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	}
 
 	querySkillTrend(options: { skill: string; project?: string; limit?: number }): UsageTrendPoint[] {
-		return this.queryTrend("skill_usage_events", "skill", options);
+		return this.queryTrend("skill_usage_events", "skill", { name: options.skill, project: options.project, limit: options.limit });
 	}
 
 	queryToolTrend(options: { tool: string; project?: string; limit?: number }): UsageTrendPoint[] {
-		return this.queryTrend("tool_usage_events", "tool", options as { name: string; project?: string; limit?: number });
+		return this.queryTrend("tool_usage_events", "tool", { name: options.tool, project: options.project, limit: options.limit });
 	}
 
 	private queryTrend(
@@ -224,7 +174,6 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		const params: unknown[] = options.project
 			? [options.name, options.project, limit]
 			: [options.name, limit];
-
 		const result = this.db.exec(
 			`select date(created_at, 'unixepoch', 'localtime') as bucket,
 			        count(*) as total,
@@ -243,26 +192,108 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	}
 
 	close(): void {
-		this.save();
+		this.closed = true;
+		this.saveSync();
 		this.db.close();
 	}
 
 	private save(): void {
-		if (this.savePending) return;
+		if (this.savePending || this.closed) return;
 		this.savePending = true;
-		// Use microtask to batch concurrent writes
 		queueMicrotask(() => {
-			this.savePending = false;
-			try {
-				const data = this.db.export();
-				const tmp = this.dbPath + ".tmp";
-				writeFileSync(tmp, Buffer.from(data));
-				renameSync(tmp, this.dbPath);
-			} catch (error) {
-				console.error("pi-skill-stats: failed to save database", error);
-			}
+			if (this.closed) return;
+			this.saveSync();
 		});
 	}
+
+	private saveSync(): void {
+		if (this.closed) return;
+		this.savePending = false;
+		try {
+			const data = this.db.export();
+			const tmp = this.dbPath + ".tmp";
+			writeFileSync(tmp, Buffer.from(data));
+			renameSync(tmp, this.dbPath);
+		} catch (error) {
+			console.error("pi-skill-stats: failed to save database", error);
+		}
+	}
+}
+
+function initializeSchema(db: Database): void {
+	db.run(`
+		create table if not exists skill_usage_events(
+			id integer primary key,
+			skill text not null,
+			project text not null,
+			created_at integer not null,
+			origin_key text
+		);
+	`);
+	db.run(`
+		create table if not exists tool_usage_events(
+			id integer primary key,
+			tool text not null,
+			project text not null,
+			created_at integer not null,
+			origin_key text
+		);
+	`);
+
+	// Migration: old source column with origin key normalization
+	const columns = db.exec("pragma table_info(skill_usage_events)");
+	const colNames = (columns[0]?.values ?? []).map((row) => row[0] as string);
+	if (colNames.includes("source")) {
+		db.exec(`
+			alter table skill_usage_events rename to skill_usage_events_v1;
+			create table skill_usage_events(
+				id integer primary key,
+				skill text not null,
+				project text not null,
+				created_at integer not null,
+				origin_key text
+			);
+		`);
+		migrateV1Rows(db);
+	} else if (legacyV1TableExists(db)) {
+		migrateV1Rows(db);
+	}
+
+	db.exec("create index if not exists idx_skill_usage_project on skill_usage_events(project, skill)");
+	db.exec("create index if not exists idx_skill_usage_skill on skill_usage_events(skill)");
+	db.exec("create index if not exists idx_skill_usage_created_at on skill_usage_events(created_at)");
+	db.exec("create unique index if not exists idx_skill_usage_origin_key on skill_usage_events(origin_key) where origin_key is not null");
+	db.exec("create index if not exists idx_tool_usage_project on tool_usage_events(project, tool)");
+	db.exec("create index if not exists idx_tool_usage_tool on tool_usage_events(tool)");
+	db.exec("create index if not exists idx_tool_usage_created_at on tool_usage_events(created_at)");
+	db.exec("create unique index if not exists idx_tool_usage_origin_key on tool_usage_events(origin_key) where origin_key is not null");
+}
+
+function migrateV1Rows(db: Database): void {
+	// Normalize origin keys: migrate :manual:/:agent:/:unknown: segments to the
+	// modern format and deduplicate by normalized origin key.
+	db.exec(`
+		insert or ignore into skill_usage_events(id, skill, project, created_at, origin_key)
+		select
+		  min(id),
+		  min(skill),
+		  min(project),
+		  max(created_at),
+		  case
+		    when origin_key like 'scan:%:manual:%' then replace(origin_key, ':manual:', ':')
+		    when origin_key like 'scan:%:agent:%'  then replace(origin_key, ':agent:', ':')
+		    when origin_key like 'scan:%:unknown:%' then replace(origin_key, ':unknown:', ':')
+		    else origin_key
+		  end as normalized_origin_key
+		from skill_usage_events_v1
+		group by case when normalized_origin_key is null then 'row:' || id else normalized_origin_key end;
+	`);
+	db.exec("drop table skill_usage_events_v1");
+}
+
+function legacyV1TableExists(db: Database): boolean {
+	const rows = db.exec("select name from sqlite_master where type = 'table' and name = 'skill_usage_events_v1'");
+	return rows.length > 0 && rows[0].values.length > 0;
 }
 
 function parseRows<T>(

@@ -43,18 +43,25 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(message, "warning");
 	}
 
+	let storeInit: Promise<SkillStatsStore | undefined> | undefined;
 	async function ensureStore(ctx: ExtensionContext): Promise<SkillStatsStore | undefined> {
 		if (statsDisabled) return undefined;
 		if (store) return store;
-		try {
-			const config = loadConfig();
-			store = await SQLiteSkillStatsStore.create(config.dataDir);
-			return store;
-		} catch (error) {
-			statsDisabled = true;
-			notifyOnce(ctx, "init", `pi-skill-stats disabled: ${errorMessage(error)}`);
-			return undefined;
+		if (!storeInit) {
+			storeInit = (async () => {
+				try {
+					const config = loadConfig();
+					store = await SQLiteSkillStatsStore.create(config.dataDir);
+					return store;
+				} catch (error) {
+					statsDisabled = true;
+					storeInit = undefined;
+					notifyOnce(ctx, "init", `pi-skill-stats disabled: ${errorMessage(error)}`);
+					return undefined;
+				}
+			})();
 		}
+		return storeInit;
 	}
 
 	async function record(ctx: ExtensionContext, skill: string, originKey?: string) {
@@ -90,7 +97,7 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		refreshRegistry();
-		ensureStore(ctx);
+		await ensureStore(ctx);
 	});
 
 	pi.on("input", async (event, ctx) => {
