@@ -16,7 +16,8 @@
       "./extensions/pi-stats/src/index.ts",
       "./extensions/pi-execution-time/execution-time.ts",
       "./extensions/pi-intercom/index.ts",
-      "./extensions/pi-fast-mode/index.ts"
+      "./extensions/pi-fast-mode/index.ts",
+    "./extensions/pi-inline-skill/index.ts"
     ],
     "skills": [
       "./extensions/pi-intercom/skills"
