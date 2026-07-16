@@ -50,7 +50,7 @@ export default function promptSearchExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => openPromptSearch(ctx),
 	});
 
-	pi.registerShortcut("ctrl+r", {
+	pi.registerShortcut("ctrl+up", {
 		description: "Search prompt history",
 		handler: async (ctx) => openPromptSearch(ctx),
 	});
