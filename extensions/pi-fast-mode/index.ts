@@ -151,9 +151,9 @@ export default function fastModeExtension(pi: ExtensionAPI) {
     const st = modelStatus(ctx);
     const theme = ctx.ui.theme;
     if (!st.supported) {
-      ctx.ui.setStatus(STATUS_KEY, theme.fg("warning", "⚡ fast*"));
+      ctx.ui.setStatus(STATUS_KEY, theme.fg("muted", "⚡"));
     } else {
-      ctx.ui.setStatus(STATUS_KEY, theme.fg("accent", "⚡ fast"));
+      ctx.ui.setStatus(STATUS_KEY, theme.fg("accent", "⚡fast"));
     }
   }
 
