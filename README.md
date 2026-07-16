@@ -20,6 +20,7 @@ pi install git:github.com/sjet47/pi-setup@v0.1.0
 | `pi-stats/` | Record and report skill/tool usage statistics | [repo/pi-stats](https://github.com/sjet47/pi-stats) |
 | `pi-execution-time/` | Show prompt execution time in the footer | [lukaspanni/pi-execution-time](https://github.com/lukaspanni/pi-execution-time) |
 | `pi-intercom/` | Session-to-session messaging and coordination | [repo/pi-intercom](https://github.com/sjet47/pi-intercom) |
+| `pi-fast-mode/` | Auto-detect fast mode (service_tier/speed) by model API format | [rewrite] |
 
 ## Selective Loading
 

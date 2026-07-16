@@ -11,6 +11,7 @@
     "extensions/pi-shots",
     "extensions/pi-stats/src",
     "extensions/pi-execution-time",
-    "extensions/pi-intercom"
+    "extensions/pi-intercom",
+    "extensions/pi-fast-mode"
   ]
 }
