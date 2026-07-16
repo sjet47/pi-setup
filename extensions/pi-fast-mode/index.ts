@@ -76,6 +76,17 @@ async function loadConfig(cwd: string): Promise<UserConfig> {
   return {};
 }
 
+async function saveEnabledState(enabled: boolean): Promise<void> {
+  try {
+    await mkdir(GLOBAL_CONFIG_DIR, { recursive: true });
+    // Read existing config, merge enabled, write back
+    let cfg: UserConfig = {};
+    try { cfg = JSON.parse(await readFile(GLOBAL_CONFIG_PATH, "utf8")) as UserConfig; } catch { /* ignore */ }
+    cfg.enabled = enabled;
+    await writeFile(GLOBAL_CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf8");
+  } catch { /* best-effort */ }
+}
+
 function isExcluded(model: { id: string }, exclude: string[]): boolean {
   if (exclude.length === 0) return false;
   // Simple prefix/glob matching
@@ -159,6 +170,7 @@ export default function fastModeExtension(pi: ExtensionAPI) {
 
   function persistState(ctx: ExtensionContext): void {
     pi.appendEntry(STATE_ENTRY_TYPE, { enabled });
+    saveEnabledState(enabled);
   }
 
   async function restoreState(ctx: ExtensionContext): Promise<void> {
@@ -172,6 +184,15 @@ export default function fastModeExtension(pi: ExtensionAPI) {
         return;
       }
     }
+    // Fall back to config file
+    try {
+      const cfg = await loadConfig(ctx.cwd);
+      if (typeof cfg.enabled === "boolean") {
+        enabled = cfg.enabled;
+        updateStatus(ctx);
+        return;
+      }
+    } catch { /* ignore */ }
     // Fall back to flag or default
     enabled = pi.getFlag("fast") === true;
     updateStatus(ctx);
