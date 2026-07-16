@@ -43,12 +43,12 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(message, "warning");
 	}
 
-	function ensureStore(ctx: ExtensionContext): SkillStatsStore | undefined {
+	async function ensureStore(ctx: ExtensionContext): Promise<SkillStatsStore | undefined> {
 		if (statsDisabled) return undefined;
 		if (store) return store;
 		try {
 			const config = loadConfig();
-			store = new SQLiteSkillStatsStore(config.dbPath);
+			store = await SQLiteSkillStatsStore.create(config.dataDir);
 			return store;
 		} catch (error) {
 			statsDisabled = true;
@@ -57,8 +57,8 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	function record(ctx: ExtensionContext, skill: string, originKey?: string) {
-		const activeStore = ensureStore(ctx);
+	async function record(ctx: ExtensionContext, skill: string, originKey?: string) {
+		const activeStore = await ensureStore(ctx);
 		if (!activeStore) return;
 		try {
 			activeStore.insert({ skill, project: ctx.cwd, originKey });
@@ -67,9 +67,8 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 			notifyOnce(ctx, "write", `pi-skill-stats write failed: ${errorMessage(error)}`);
 		}
 	}
-
 	function recordTool(ctx: ExtensionContext, tool: string, originKey?: string) {
-		const activeStore = ensureStore(ctx);
+		const activeStore = await ensureStore(ctx);
 		if (!activeStore) return;
 		try {
 			activeStore.insertTool({ tool, project: ctx.cwd, originKey });
@@ -98,7 +97,7 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		refreshRegistry();
 		detector.startTurn();
 		const detected = detector.detectInput(event.text);
-		if (detected.length > 0 && ensureStore(ctx)) {
+		if (detected.length > 0 && await ensureStore(ctx)) {
 			pendingInputSkills.push(...detected.map((usage) => usage.skill));
 		}
 		return { action: "continue" as const };
@@ -107,27 +106,27 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 	pi.on("message_start", async (event, ctx) => {
 		// By the time the assistant message starts, the user message entry that
 		// triggered this turn has been persisted; flush input skills against it.
-		if (event.message.role === "assistant") flushPendingInputSkills(ctx);
+		if (event.message.role === "assistant") await flushPendingInputSkills(ctx);
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
 		const origin = liveOrigin(ctx, "assistant");
-		recordTool(ctx, event.toolName, origin ? toolOriginKey(origin.fileKey, origin.entryId, event.toolName) : undefined);
+		await recordTool(ctx, event.toolName, origin ? toolOriginKey(origin.fileKey, origin.entryId, event.toolName) : undefined);
 		if (!isToolCallEventType("read", event)) return;
 		refreshRegistry();
 		const path = event.input.path;
 		if (typeof path !== "string") return;
 		const usage = detector.detectSkillRead(path);
-		if (usage) record(ctx, usage.skill, origin ? skillOriginKey(origin.fileKey, origin.entryId, usage.skill) : undefined);
+		if (usage) await record(ctx, usage.skill, origin ? skillOriginKey(origin.fileKey, origin.entryId, usage.skill) : undefined);
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		flushPendingInputSkills(ctx);
+		await flushPendingInputSkills(ctx);
 		detector.endTurn();
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		flushPendingInputSkills(ctx);
+		await flushPendingInputSkills(ctx);
 		store?.close();
 		store = undefined;
 	});
@@ -142,7 +141,7 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 			return completeStatsArgs(prefix, skillNames);
 		},
 		handler: async (args, ctx) => {
-			const activeStore = ensureStore(ctx);
+			const activeStore = await ensureStore(ctx);
 			if (!activeStore) {
 				ctx.ui.notify("pi-skill-stats is disabled; check the earlier warning for details.", "warning");
 				return;
@@ -188,7 +187,7 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 			return completeStatsArgs(prefix, toolNames);
 		},
 		handler: async (args, ctx) => {
-			const activeStore = ensureStore(ctx);
+			const activeStore = await ensureStore(ctx);
 			if (!activeStore) {
 				ctx.ui.notify("pi-skill-stats is disabled; check the earlier warning for details.", "warning");
 				return;

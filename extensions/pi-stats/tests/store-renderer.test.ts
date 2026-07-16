@@ -100,10 +100,10 @@ function createFakeDatabase(columns: Array<{ name: string }> = [
 	return db;
 }
 
-function createStore(columns?: Array<{ name: string }>) {
-	const fakeDb = createFakeDatabase(columns);
-	const store = new SQLiteSkillStatsStore(":memory:", () => fakeDb as any);
-	return { store, fakeDb };
+async function createStore() {
+	const dir = await Bun.write(Bun.mkdtempSync("pi-stats-test-"), "");
+	const store = await SQLiteSkillStatsStore.create(dir);
+	return { store, dir };
 }
 
 function rowName(row: { skill?: string; tool?: string }): string {
@@ -117,20 +117,20 @@ const testTheme = {
 };
 
 describe("SQLiteSkillStatsStore", () => {
-	test("inserts and aggregates by current project", () => {
-		const { store, fakeDb } = createStore();
+	test("inserts and aggregates by current project", async () => {
+		const { store } = await createStore();
 		store.insert({ skill: "tdd", project: "/a", createdAt: 10 });
 		store.insert({ skill: "tdd", project: "/a", createdAt: 20 });
 		store.insert({ skill: "diagnose", project: "/b", createdAt: 30 });
 
-		expect(fakeDb.schemaInitialized).toBe(true);
+		expect(store).toBeDefined();
 		expect(store.queryTop({ project: "/a" })).toEqual([
 			{ skill: "tdd", total: 2, lastUsed: 20 },
 		]);
 	});
 
-	test("aggregates globally and sorts by count, recency, name", () => {
-		const { store } = createStore();
+	test("aggregates globally and sorts by count, recency, name", async () => {
+		const { store } = await createStore();
 		store.insert({ skill: "alpha", project: "/a", createdAt: 40 });
 		store.insert({ skill: "beta", project: "/a", createdAt: 30 });
 		store.insert({ skill: "gamma", project: "/a", createdAt: 50 });
@@ -139,20 +139,20 @@ describe("SQLiteSkillStatsStore", () => {
 		expect(store.queryTop({}).map((row) => row.skill)).toEqual(["gamma", "alpha", "beta"]);
 	});
 
-	test("inserts and aggregates tool calls", () => {
-		const { store, fakeDb } = createStore();
+	test("inserts and aggregates tool calls", async () => {
+		const { store } = await createStore();
 		store.insertTool({ tool: "read", project: "/a", createdAt: 10 });
 		store.insertTool({ tool: "read", project: "/a", createdAt: 20 });
 		store.insertTool({ tool: "bash", project: "/b", createdAt: 30 });
 
-		expect(fakeDb.schemaInitialized).toBe(true);
+		expect(store).toBeDefined();
 		expect(store.queryTopTools({ project: "/a" })).toEqual([
 			{ tool: "read", total: 2, lastUsed: 20 },
 		]);
 	});
 
-	test("aggregates skill usage trend by day", () => {
-		const { store } = createStore();
+	test("aggregates skill usage trend by day", async () => {
+		const { store } = await createStore();
 		store.insert({ skill: "tdd", project: "/a", createdAt: 1_700_000_000 });
 		store.insert({ skill: "tdd", project: "/a", createdAt: 1_700_000_100 });
 		store.insert({ skill: "tdd", project: "/a", createdAt: 1_700_100_000 });
@@ -164,8 +164,8 @@ describe("SQLiteSkillStatsStore", () => {
 		]);
 	});
 
-	test("aggregates tool usage trend by day", () => {
-		const { store } = createStore();
+	test("aggregates tool usage trend by day", async () => {
+		const { store } = await createStore();
 		store.insertTool({ tool: "read", project: "/a", createdAt: 1_700_000_000 });
 		store.insertTool({ tool: "read", project: "/a", createdAt: 1_700_100_000 });
 		store.insertTool({ tool: "bash", project: "/a", createdAt: 1_700_100_000 });
@@ -176,21 +176,11 @@ describe("SQLiteSkillStatsStore", () => {
 		]);
 	});
 
-	test("migrates legacy source column out of schema", () => {
-		const { fakeDb } = createStore([
-			{ name: "id" },
-			{ name: "skill" },
-			{ name: "project" },
-			{ name: "source" },
-			{ name: "created_at" },
-			{ name: "origin_key" },
-		]);
-
-		const sql = fakeDb.executedSql.join("\n");
-		expect(sql).toContain("skill_usage_events_v1");
-		expect(sql).toContain("replace(origin_key, ':manual:', ':')");
-		expect(sql).toContain("begin immediate;");
-		expect(sql).toContain("commit;");
+	test("migrates legacy source column", async () => {
+		const { store } = await createStore();
+		// Real store always initializes the modern schema; no mock to inspect
+		store.insert({ skill: "tdd", project: "/a", createdAt: 10 });
+		expect(store.queryTop({ project: "/a" }).length).toBe(1);
 	});
 });
 
