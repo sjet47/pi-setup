@@ -16,6 +16,7 @@
     "extensions/pi-search-prompts",
     "extensions/pi-inline-skill",
     "extensions/pi-wakatime/src",
-    "extensions/pi-wakatime/test"
+    "extensions/pi-wakatime/test",
+    "extensions/pi-cache-graph"
   ]
 }

@@ -9,7 +9,10 @@
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test:wakatime": "node --import tsx --test extensions/pi-wakatime/test/*.test.ts"
+    "typecheck:cache-graph": "tsc --noEmit -p extensions/pi-cache-graph/tsconfig.json",
+    "test": "npm run test:wakatime && npm run test:cache-graph",
+    "test:wakatime": "node --import tsx --test extensions/pi-wakatime/test/*.test.ts",
+    "test:cache-graph": "vitest run --config extensions/pi-cache-graph/vitest.config.ts"
   },
   "pi": {
     "extensions": [
@@ -20,7 +23,8 @@
       "./extensions/pi-fast-mode/index.ts",
       "./extensions/pi-search-prompts/index.ts",
       "./extensions/pi-inline-skill/index.ts",
-      "./extensions/pi-wakatime/src/index.ts"
+      "./extensions/pi-wakatime/src/index.ts",
+      "./extensions/pi-cache-graph/index.ts"
     ],
     "skills": [
       "./extensions/pi-intercom/skills"
@@ -32,14 +36,17 @@
     "typebox": "^1.1.24"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.75.5",
     "@earendil-works/pi-coding-agent": "^0.75.3",
     "@earendil-works/pi-tui": "^0.80.7",
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.13.10",
     "tsx": "^4.23.1",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "^4.1.10"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   }
