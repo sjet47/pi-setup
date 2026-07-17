@@ -3,3 +3,4 @@ dist/
 *.tsbuildinfo
 .pi/
 bun.lock
+HANDOFF.md

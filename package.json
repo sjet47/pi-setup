@@ -8,7 +8,8 @@
   ],
   "license": "MIT",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:wakatime": "node --import tsx --test extensions/pi-wakatime/test/*.test.ts"
   },
   "pi": {
     "extensions": [
@@ -18,20 +19,24 @@
       "./extensions/pi-intercom/index.ts",
       "./extensions/pi-fast-mode/index.ts",
       "./extensions/pi-search-prompts/index.ts",
-    "./extensions/pi-inline-skill/index.ts"
+      "./extensions/pi-inline-skill/index.ts",
+      "./extensions/pi-wakatime/src/index.ts"
     ],
     "skills": [
       "./extensions/pi-intercom/skills"
     ]
   },
   "dependencies": {
+    "adm-zip": "^0.6.0",
     "sql.js": "^1.11.0",
     "typebox": "^1.1.24"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.75.3",
     "@earendil-works/pi-tui": "^0.80.7",
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.13.10",
+    "tsx": "^4.23.1",
     "typescript": "^5.8.2"
   },
   "peerDependencies": {

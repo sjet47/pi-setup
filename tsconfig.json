@@ -14,6 +14,8 @@
     "extensions/pi-intercom",
     "extensions/pi-fast-mode",
     "extensions/pi-search-prompts",
-    "extensions/pi-inline-skill"
+    "extensions/pi-inline-skill",
+    "extensions/pi-wakatime/src",
+    "extensions/pi-wakatime/test"
   ]
 }
