@@ -33,6 +33,7 @@
   "dependencies": {
     "adm-zip": "^0.6.0",
     "sql.js": "^1.11.0",
+    "tsx": "^4.23.1",
     "typebox": "^1.1.24"
   },
   "devDependencies": {
@@ -41,7 +42,6 @@
     "@earendil-works/pi-tui": "^0.80.7",
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.13.10",
-    "tsx": "^4.23.1",
     "typescript": "^5.8.2",
     "vitest": "^4.1.10"
   },
