@@ -47,6 +47,14 @@ interface ConnectedSession {
   info: SessionInfo;
 }
 
+/**
+ * A transient connection that can list sessions and send messages (and receive
+ * replies) without being a real pi session. Guests never appear in session
+ * lists and are never announced to other clients, but their assigned id routes
+ * replies back to them.
+ */
+type ConnectedGuest = ConnectedSession;
+
 function isAttachment(value: unknown): value is Attachment {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -127,6 +135,7 @@ function isSessionRegistration(value: unknown): value is Omit<SessionInfo, "id">
 
 class IntercomBroker {
   private sessions = new Map<string, ConnectedSession>();
+  private guests = new Map<string, ConnectedGuest>();
   private server: net.Server;
   private shutdownTimer: NodeJS.Timeout | null = null;
 
@@ -164,8 +173,12 @@ class IntercomBroker {
 
     socket.on("close", () => {
       if (sessionId) {
-        this.sessions.delete(sessionId);
-        this.broadcast({ type: "session_left", sessionId }, sessionId);
+        if (this.guests.has(sessionId)) {
+          this.guests.delete(sessionId);
+        } else {
+          this.sessions.delete(sessionId);
+          this.broadcast({ type: "session_left", sessionId }, sessionId);
+        }
 
         this.scheduleShutdownCheck();
       }
@@ -181,7 +194,7 @@ class IntercomBroker {
 
     this.shutdownTimer = setTimeout(() => {
       this.shutdownTimer = null;
-      if (this.sessions.size === 0) {
+      if (this.sessions.size === 0 && this.guests.size === 0) {
         this.shutdown("no sessions connected");
       }
     }, 5000);
@@ -209,6 +222,10 @@ class IntercomBroker {
           throw new Error("Invalid register message");
         }
 
+        if (clientMessage.guest !== undefined && typeof clientMessage.guest !== "boolean") {
+          throw new Error("Invalid guest flag");
+        }
+
         if (currentId) {
           throw new Error("Received duplicate register message");
         }
@@ -216,7 +233,12 @@ class IntercomBroker {
         const id = randomUUID();
         setId(id);
         const info: SessionInfo = { ...clientMessage.session, id };
-        this.sessions.set(id, { socket, info });
+        const isGuest = clientMessage.guest === true;
+        if (isGuest) {
+          this.guests.set(id, { socket, info });
+        } else {
+          this.sessions.set(id, { socket, info });
+        }
         
         if (this.shutdownTimer) {
           clearTimeout(this.shutdownTimer);
@@ -224,14 +246,20 @@ class IntercomBroker {
         }
 
         writeMessage(socket, { type: "registered", sessionId: id });
-        this.broadcast({ type: "session_joined", session: info }, id);
+        if (!isGuest) {
+          this.broadcast({ type: "session_joined", session: info }, id);
+        }
         break;
       }
 
       case "unregister": {
         // currentId is non-null here: non-register messages before register throw above.
-        this.sessions.delete(currentId!);
-        this.broadcast({ type: "session_left", sessionId: currentId! }, currentId!);
+        if (this.guests.has(currentId!)) {
+          this.guests.delete(currentId!);
+        } else {
+          this.sessions.delete(currentId!);
+          this.broadcast({ type: "session_left", sessionId: currentId! }, currentId!);
+        }
         setId(null);
         this.scheduleShutdownCheck();
         break;
@@ -263,7 +291,7 @@ class IntercomBroker {
         const targets = this.findSessions(clientMessage.to);
         if (targets.length === 1) {
           // currentId is non-null here: non-register messages before register throw above.
-          const fromSession = this.sessions.get(currentId!);
+          const fromSession = this.sessions.get(currentId!) ?? this.guests.get(currentId!);
           if (!fromSession) {
             writeMessage(socket, {
               type: "delivery_failed",
@@ -300,7 +328,7 @@ class IntercomBroker {
 
       case "presence": {
         // currentId is non-null here: non-register messages before register throw above.
-        const session = this.sessions.get(currentId!);
+        const session = this.sessions.get(currentId!) ?? this.guests.get(currentId!);
         if (session) {
           if (clientMessage.name !== undefined) {
             if (typeof clientMessage.name !== "string") {
@@ -321,7 +349,10 @@ class IntercomBroker {
             session.info.model = clientMessage.model;
           }
           session.info.lastActivity = Date.now();
-          this.broadcast({ type: "presence_update", session: session.info }, currentId!);
+          // Guests are invisible: their presence changes are never announced.
+          if (!this.guests.has(currentId!)) {
+            this.broadcast({ type: "presence_update", session: session.info }, currentId!);
+          }
         }
         break;
       }
@@ -335,6 +366,13 @@ class IntercomBroker {
     const byId = this.sessions.get(nameOrId);
     if (byId) {
       return [byId];
+    }
+
+    // Guests are only reachable by their exact id so replies can be routed
+    // back to them without exposing ephemeral CLI connections to name lookup.
+    const guest = this.guests.get(nameOrId);
+    if (guest) {
+      return [guest];
     }
 
     const lowerName = nameOrId.toLowerCase();

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# pi-intercom CLI launcher.
+#
+# Runs cli.ts through the tsx runtime that ships with the pi-setup/pi-intercom
+# install. Resolves the real script path so this works when symlinked into
+# ~/.local/bin (or anywhere on PATH).
+#
+# Usage:
+#   pi-intercom list
+#   pi-intercom ask <target> <message...>
+#   ...
+#
+# To install:  ln -s <this file> ~/.local/bin/pi-intercom
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+CLI_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+EXT_DIR="$(cd "$CLI_DIR/.." && pwd)"
+
+TSX=""
+for candidate in \
+  "$EXT_DIR/node_modules/tsx/dist/cli.mjs" \
+  "$CLI_DIR/../../../node_modules/tsx/dist/cli.mjs"
+do
+  if [ -f "$candidate" ]; then
+    TSX="$candidate"
+    break
+  fi
+done
+
+if [ -z "$TSX" ]; then
+  echo "pi-intercom: tsx not found under $EXT_DIR/node_modules or the repo root. Run 'npm install' first." >&2
+  exit 1
+fi
+
+exec node "$TSX" "$CLI_DIR/cli.ts" "$@"

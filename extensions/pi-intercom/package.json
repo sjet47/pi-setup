@@ -4,6 +4,9 @@
   "license": "MIT",
   "type": "module",
   "main": "index.ts",
+  "bin": {
+    "pi-intercom": "./cli/pi-intercom"
+  },
   "files": [
     "index.ts",
     "types.ts",
@@ -11,11 +14,12 @@
     "reply-tracker.ts",
     "broker/**/*.ts",
     "ui/**/*.ts",
+    "cli/**",
     "skills/**/*"
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "tsx --test broker/paths.test.ts broker/spawn.test.ts broker/framing.test.ts broker/broker-startup.test.ts reply-tracker.test.ts intercom.integration.test.ts test/inline-message.test.ts"
+    "test": "tsx --test broker/paths.test.ts broker/spawn.test.ts broker/framing.test.ts broker/broker-startup.test.ts broker/guest.test.ts"
   },
   "keywords": [
     "pi-package"

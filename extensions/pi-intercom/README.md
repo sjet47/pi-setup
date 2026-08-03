@@ -118,6 +118,56 @@ See auth.ts:142-156.
 
 The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately; busy interactive recipients receive the message once they go idle. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
 
+## CLI (Command Line)
+
+You don't need to be inside pi to talk to a running session. The extension ships a small CLI that connects to the same local broker, so you can message or ask any running agent directly from your terminal:
+
+```bash
+pi-intercom list                          # list connected pi sessions
+pi-intercom status                        # show broker/session status
+pi-intercom send worker "Task-4: run the migration"   # fire-and-forget
+pi-intercom ask worker "Should I use A or B?"        # ask and wait for the reply
+```
+
+`ask` sends the message with `expectsReply: true`, so the receiving agent sees the usual reply hint and can answer with `intercom({ action: "reply", message: "..." })`. The CLI blocks until the reply arrives (default 10-minute timeout, `--timeout <seconds>` to override, Ctrl+C to abort) and prints the reply on stdout:
+
+```bash
+$ pi-intercom ask planner "Retry POST requests too?"
+Asking planner (a518e269)... waiting for reply (timeout 600s)
+Only GET/PUT/DELETE — never POST. Max 3 retries.
+```
+
+When the message argument is empty, the message is read from stdin — piped for multi-line content, or typed interactively (finish with Ctrl+D):
+
+```bash
+echo "Should I use exponential backoff or fixed intervals?" | pi-intercom ask worker
+pi-intercom ask worker   # then type the message, press Ctrl+D
+```
+
+### Install
+
+**Global via bun** (links the live folder, so `git pull` updates the command):
+
+```bash
+cd <where pi-setup lives>/extensions/pi-intercom
+bun link
+```
+
+**Symlink onto PATH** (any shell):
+
+```bash
+ln -s ~/.pi/agent/git/github.com/sjet47/pi-setup/extensions/pi-intercom/cli/pi-intercom ~/.local/bin/pi-intercom
+```
+
+The path above matches a `pi install git:github.com/sjet47/pi-setup` layout; point the symlink at wherever the extension lives in your setup. When installed via npm (`pi install npm:pi-intercom`), the `bin` entry provides the same `pi-intercom` command after the package is linked.
+
+### Notes
+
+- The CLI connects as an **invisible guest**: it never appears in `intercom({ action: "list" })`, other sessions are not notified when it connects, and it is only addressable by its exact session id (so replies reach it, but agents can't target it by name).
+- Data goes to stdout (session list, replies); progress/status messages go to stderr, so `pi-intercom ask ... | jq`-style pipelines stay clean.
+- If the broker is not running, the CLI auto-spawns it (same as pi sessions do).
+- `--name <name>` sets the sender name the recipient sees (default: `cli`), e.g. `pi-intercom --name deploy-script ask worker "check the deploy"`.
+
 ## Workflow: Planner-Worker Coordination
 
 The most natural use of pi-intercom is splitting a task between two sessions — one holds the big picture, the other does the hands-on work. When the worker hits an ambiguity ("should I optimize for readability or performance here?"), they ask without losing context.
@@ -467,7 +517,11 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 │   ├── paths.ts          # Platform-specific socket/pipe paths
 │   ├── spawn.ts          # Auto-spawn logic with lock file
 │   ├── spawn.test.ts     # Broker spawn tests
-│   └── paths.test.ts     # Path resolution tests
+│   ├── paths.test.ts     # Path resolution tests
+│   └── guest.test.ts     # Guest/CLI protocol tests
+├── cli/
+│   ├── cli.ts            # Command-line client (list/send/ask/status)
+│   └── pi-intercom       # Bash launcher (symlink onto PATH)
 ├── ui/
 │   ├── session-list.ts   # Session selection overlay
 │   ├── compose.ts        # Message composition overlay
