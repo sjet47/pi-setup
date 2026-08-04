@@ -10,6 +10,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Added `list_all` to `intercom({ action: "list" })`: lists now default to the current cwd and group all-session results by cwd when requested.
 
 ### Changed
+- Removed `/intercom-name`; session name changes now sync intercom presence through Pi's `session_info_changed` event (Pi 0.80.3+), so native `/name` is sufficient.
 - `intercom` list rows now show each agent's normalized `working` or `idle` state beside its session name.
 
 ## [0.6.0] - 2026-05-03
