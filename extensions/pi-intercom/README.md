@@ -24,7 +24,7 @@ Pi-intercom also integrates well with [pi-subagents](https://github.com/nicobail
 
 ## In One Minute
 
-Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages are rendered inline inside the recipient session, can trigger a turn immediately, and are also stored in Pi session history as extension entries.
+Each pi session that has `pi-intercom` loaded and enabled connects to a tiny local broker over a local IPC transport. The broker keeps track of connected sessions and routes direct messages to the one you target by name or session ID. Typing `#` in the editor suggests a session's `/name`, but the `intercom` tool itself takes the plain name/ID. The extension gives you both a tool (`intercom`) and a small overlay UI (`/intercom` or `Alt+M`). Incoming messages are rendered inline inside the recipient session, can trigger a turn immediately, and are also stored in Pi session history as extension entries.
 
 ## Install
 
@@ -81,7 +81,7 @@ intercom({ action: "list" })
 // List every connected session, grouped by working directory
 intercom({ action: "list", list_all: true })
 
-// Send a message
+// Send using the plain session name
 intercom({ action: "send", to: "research", message: "Check if UserService.validate() handles null" })
 // → Message sent to research
 
@@ -117,6 +117,32 @@ See auth.ts:142-156.
 ```
 
 The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately; busy interactive recipients receive the message once they go idle. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
+
+### Inline # Targets
+
+Typing `#` in the editor autocompletes a connected session's `/name`, so you can pick the exact target without mistyping it. `#worker` is only an input-time marker; `intercom list` output itself is unchanged.
+
+Use `#worker` in the prompt as the selection marker; when calling the `intercom` tool, pass the plain session name without `#`:
+
+```text
+给 #worker 发消息：Task-3: add retry logic
+问下 #worker 这个 API 的限流策略
+```
+
+```typescript
+intercom({ action: "send", to: "worker", message: "Task-3: add retry logic" })
+intercom({ action: "ask", to: "worker", message: "这个 API 的限流策略是什么？" })
+```
+
+When a known `#alias` is present, the extension appends this instruction to the user message instead of globally injecting it:
+
+```xml
+<pi_intercom> use tool `intercom` with target as "worker" </pi_intercom>
+```
+
+Messages without a known `#alias` are left untouched, so the model never sees the intercom routing hint unless the `#` feature is used.
+
+While typing, known `#aliases` are suggested after `#`. Unknown `#tokens`, Markdown headings, slash commands, and prompts referencing multiple different aliases are left unchanged. Sessions with duplicate `/name` values keep the same alias and remain ambiguous; use the session ID from the list to disambiguate.
 
 ## CLI (Command Line)
 
@@ -405,6 +431,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 | Key | Action |
 |-----|--------|
 | Alt+M | Open session list overlay |
+| `#` | Suggest known intercom `#alias` targets in the editor |
 | ↑/↓ | Navigate session list |
 | Enter | Select session / Send message |
 | Escape | Cancel / Close overlay |
@@ -508,6 +535,8 @@ Use pi-messenger for multi-agent swarms working on a shared task. Use pi-interco
 ~/.pi/agent/extensions/pi-intercom/
 ├── package.json
 ├── index.ts              # Extension entry point
+├── alias.ts              # #alias autocomplete/input helpers
+├── alias.test.ts         # #alias unit tests
 ├── types.ts              # SessionInfo, Message, protocol types
 ├── config.ts             # Config loading
 ├── broker/

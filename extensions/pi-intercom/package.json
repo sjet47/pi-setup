@@ -9,6 +9,7 @@
   },
   "files": [
     "index.ts",
+    "alias.ts",
     "types.ts",
     "config.ts",
     "reply-tracker.ts",
@@ -19,7 +20,7 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "tsx --test broker/paths.test.ts broker/spawn.test.ts broker/framing.test.ts broker/broker-startup.test.ts broker/guest.test.ts"
+    "test": "tsx --test alias.test.ts broker/paths.test.ts broker/spawn.test.ts broker/framing.test.ts broker/broker-startup.test.ts broker/guest.test.ts"
   },
   "keywords": [
     "pi-package"

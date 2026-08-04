@@ -5,6 +5,8 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ## [Unreleased]
 
 ### Added
+- Added `#alias` input completion: typing `#` in the editor suggests connected sessions' `/name`; the `intercom` tool targets use plain session name/ID.
+- Added conditional inline routing: when a known `#alias` appears in a user message, append a short instruction to that message telling the model to use the `intercom` tool with `to: "worker"`; messages without `#alias` receive no intercom routing hint.
 - Added a `pi-intercom` CLI (`cli/pi-intercom`) for messaging running pi sessions from the command line: `pi-intercom list`, `send`, `ask` (blocks until the recipient replies), and `status`. When the message argument is empty, the message is read from stdin (piped or typed interactively, Ctrl+D to finish). Supports a `--timeout` override for `ask` and `--name` to set the sender name.
 - The broker now accepts guest connections (`register` with `guest: true`): guests can list sessions, send messages, and receive replies routed by id, but never appear in session lists, are never announced via `session_joined`/`session_left`, and cannot be addressed by name.
 - Added `list_all` to `intercom({ action: "list" })`: lists now default to the current cwd and group all-session results by cwd when requested.

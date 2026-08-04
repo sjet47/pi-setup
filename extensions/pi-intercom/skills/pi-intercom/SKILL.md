@@ -36,6 +36,8 @@ The most common pattern. One session holds the big picture, others do hands-on w
 /name worker     # Terminal 2
 ```
 
+Typing `#` in the editor suggests each session's `/name`. Use the plain name (without `#`) as the tool target; `#` is only the input marker. When a known `#alias` appears in a user message, the extension appends `<pi_intercom> use tool `intercom` with target as "worker" </pi_intercom>` to that message; messages without `#alias` get no intercom routing hint.
+
 **Planner delegates a task** (fire-and-forget):
 ```typescript
 intercom({
