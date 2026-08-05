@@ -56,7 +56,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 			this.onDone();
 			return;
 		}
-		if (matchesKey(data, Key.ctrl("s"))) {
+		if (matchesKey(data, Key.tab)) {
 			this.toggleScope();
 			return;
 		}
@@ -113,7 +113,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 		lines.push(
 			this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
 			this.line(this.renderSearch(contentWidth), contentWidth),
-			this.line(this.theme.fg("dim", "Up/Down navigate | Enter use | Esc cancel | Ctrl+S scope"), contentWidth),
+			this.line(this.theme.fg("dim", "Up/Down navigate | Enter use | Esc cancel | Tab scope"), contentWidth),
 			this.border("bottom", width),
 		);
 		this.cachedWidth = width;
