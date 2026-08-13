@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
-import { DEFAULT_DB_PATH, expandHome, loadConfig } from "../src/config";
+import { DEFAULT_CONFIG_DIR, expandHome, loadConfig } from "../src/config";
 
 let dir: string;
 
@@ -15,28 +15,28 @@ afterEach(() => {
 });
 
 describe("loadConfig", () => {
-	test("returns default database path", () => {
+	test("returns default data dir", () => {
 		const config = loadConfig({ env: {}, configPath: join(dir, "missing.json"), ensureDir: false });
-		expect(config.dbPath).toBe(expandHome(DEFAULT_DB_PATH));
+		expect(config.dataDir).toBe(DEFAULT_CONFIG_DIR);
 	});
 
-	test("applies config dbPath override", () => {
+	test("applies config dataDir override", () => {
 		const configPath = join(dir, "config.json");
-		writeFileSync(configPath, JSON.stringify({ dbPath: "./custom.sqlite" }));
+		writeFileSync(configPath, JSON.stringify({ dataDir: "./custom" }));
 		const config = loadConfig({ env: {}, configPath, cwd: dir, ensureDir: false });
-		expect(config.dbPath).toBe(join(dir, "custom.sqlite"));
+		expect(config.dataDir).toBe(join(dir, "custom"));
 	});
 
 	test("applies environment override over config", () => {
 		const configPath = join(dir, "config.json");
-		writeFileSync(configPath, JSON.stringify({ dbPath: "./config.sqlite" }));
+		writeFileSync(configPath, JSON.stringify({ dataDir: "./config" }));
 		const config = loadConfig({
-			env: { PI_SKILL_STATS_DB: "./env.sqlite" },
+			env: { PI_SKILL_STATS_DIR: "./env" },
 			configPath,
 			cwd: dir,
 			ensureDir: false,
 		});
-		expect(config.dbPath).toBe(join(dir, "env.sqlite"));
+		expect(config.dataDir).toBe(join(dir, "env"));
 	});
 
 	test("expands home paths", () => {

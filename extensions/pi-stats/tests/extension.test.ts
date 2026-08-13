@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import skillStatsExtension from "../src/index";
 
 function createPi(commands: any[] = []) {
@@ -42,8 +42,8 @@ describe("extension", () => {
 	});
 
 	test("fails open when database init fails", async () => {
-		const oldEnv = process.env.PI_SKILL_STATS_DB;
-		process.env.PI_SKILL_STATS_DB = "/dev/null/stats.sqlite";
+		const oldEnv = process.env.PI_SKILL_STATS_DIR;
+		process.env.PI_SKILL_STATS_DIR = "/dev/null/stats.sqlite";
 		try {
 			const { pi, handlers } = createPi([
 				{ name: "tdd", source: "skill", sourceInfo: { path: "/skills/tdd/SKILL.md" } },
@@ -53,14 +53,14 @@ describe("extension", () => {
 			await handlers.get("input")![0]({ source: "interactive", text: "/skill:tdd" }, ctx);
 			expect(notifications[0].message).toContain("pi-skill-stats disabled");
 		} finally {
-			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DB;
-			else process.env.PI_SKILL_STATS_DB = oldEnv;
+			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DIR;
+			else process.env.PI_SKILL_STATS_DIR = oldEnv;
 		}
 	});
 
 	test("attempts to record skill calls from extension-sourced expanded messages", async () => {
-		const oldEnv = process.env.PI_SKILL_STATS_DB;
-		process.env.PI_SKILL_STATS_DB = "/dev/null/stats.sqlite";
+		const oldEnv = process.env.PI_SKILL_STATS_DIR;
+		process.env.PI_SKILL_STATS_DIR = "/dev/null/stats.sqlite";
 		try {
 			const { pi, handlers } = createPi([
 				{ name: "diagnose", source: "skill", sourceInfo: { path: "/skills/diagnose/SKILL.md" } },
@@ -74,14 +74,14 @@ describe("extension", () => {
 
 			expect(notifications[0].message).toContain("pi-skill-stats disabled");
 		} finally {
-			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DB;
-			else process.env.PI_SKILL_STATS_DB = oldEnv;
+			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DIR;
+			else process.env.PI_SKILL_STATS_DIR = oldEnv;
 		}
 	});
 
 	test("reports disabled store in command handlers", async () => {
-		const oldEnv = process.env.PI_SKILL_STATS_DB;
-		process.env.PI_SKILL_STATS_DB = "/dev/null/stats.sqlite";
+		const oldEnv = process.env.PI_SKILL_STATS_DIR;
+		process.env.PI_SKILL_STATS_DIR = "/dev/null/stats.sqlite";
 		try {
 			const { pi, registeredCommands } = createPi();
 			const { ctx, notifications } = createCtx();
@@ -92,14 +92,14 @@ describe("extension", () => {
 				"pi-skill-stats is disabled; check the earlier warning for details.",
 			);
 		} finally {
-			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DB;
-			else process.env.PI_SKILL_STATS_DB = oldEnv;
+			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DIR;
+			else process.env.PI_SKILL_STATS_DIR = oldEnv;
 		}
 	});
 
 	test("reports disabled store in tool-stats command handlers", async () => {
-		const oldEnv = process.env.PI_SKILL_STATS_DB;
-		process.env.PI_SKILL_STATS_DB = "/dev/null/stats.sqlite";
+		const oldEnv = process.env.PI_SKILL_STATS_DIR;
+		process.env.PI_SKILL_STATS_DIR = "/dev/null/stats.sqlite";
 		try {
 			const { pi, registeredCommands } = createPi();
 			const { ctx, notifications } = createCtx();
@@ -110,8 +110,8 @@ describe("extension", () => {
 				"pi-skill-stats is disabled; check the earlier warning for details.",
 			);
 		} finally {
-			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DB;
-			else process.env.PI_SKILL_STATS_DB = oldEnv;
+			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DIR;
+			else process.env.PI_SKILL_STATS_DIR = oldEnv;
 		}
 	});
 });

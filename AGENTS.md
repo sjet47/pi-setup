@@ -49,7 +49,7 @@ cp <source-repo>/index.ts extensions/<plugin-name>/
 
 - **不要删除源仓库** — 保持原地不动，方便回溯
 - **`@mariozechner/pi-*` → `@earendil-works/pi-*`**：pi-intercom 遇到过这个 fork 差异，统一用 `@earendil-works`
-- **原生模块警惕**：`better-sqlite3` 之类的 native addon 在 `pi install` 时会因为 `install-scripts` 策略被拦截（见下方「npm 依赖管理」）
+- **原生模块**：`better-sqlite3` 等 native addon 需要在顶层 `package.json` 加 `allowScripts` 放行（见下方「npm 依赖管理」），且只能在 Node 下运行，bun 无法加载
 
 ## 从头写新插件
 
@@ -107,31 +107,39 @@ EOF
 
 ## npm 依赖管理
 
-### 无原生模块的依赖（推荐）
+### 纯 JS/WASM 依赖
+
+零编译、Node/bun 双端通用，适合不需要原生性能的场景：
 
 ```json
 {
   "dependencies": {
-    "sql.js": "^1.11.0",      // SQLite via WASM，零编译
     "typebox": "^1.1.24"      // 参数 schema 定义
   }
 }
 ```
 
-### 避免使用 native addon
+### native addon（better-sqlite3）
 
-`better-sqlite3` 的教训：
+npm 12 的 `install-scripts` 策略默认**阻止所有依赖的 install 脚本**，除非包名出现在 `package.json` 的 `allowScripts` 字段里。解法是直接在顶层 `package.json` 加字段放行：
 
+```json
+{
+  "dependencies": {
+    "better-sqlite3": "^12.9.0"
+  },
+  "allowScripts": {
+    "better-sqlite3": true
+  }
+}
 ```
-# 问题：pi install 时 install-scripts 被拦截
-npm warn install-scripts   better-sqlite3@12.11.1 (install: prebuild-install || node-gyp rebuild --release)
 
-# 需要手动 approve
-npm install-scripts approve better-sqlite3
-npm rebuild better-sqlite3
-```
+这样 `pi install git:...` 时 npm 就会放行编译，不用每次手动 `npm install-scripts approve`。
 
-**每次重新 clone 安装都要重复这步**，所以在 pi 生态里优先选纯 JS/WASM 替代方案。
+**两个坑**：
+
+- `allowScripts` 只对「在哪个 package.json 里跑 npm install」生效。npm 源扩展（`pi install npm:...`）共享 `~/.pi/agent/npm/package.json` 的 allowlist；git 源扩展（pi-setup）在自己的 clone 目录 npm install，所以必须写进 pi-setup 自己的 package.json。
+- better-sqlite3 是 native addon，**只能在 Node 下运行**，bun 无法加载（dlopen 失败，bun 官方 issue #4290）。pi-stats 因此把测试从 `bun test` 迁到了 vitest（Node 运行时）。
 
 ### 依赖升级流程
 
@@ -215,16 +223,16 @@ pi list
 | 症状 | 原因 | 排查 |
 |------|------|------|
 | `ParseError: Unexpected reserved word` | `await` 在非 `async` 函数里 | 检查所有 `function` 声明是否漏了 `async` |
-| `Could not locate the bindings file` | native addon 未编译 | 换成纯 JS 替代方案 |
-| `Cannot find module 'sql.js'` | 依赖没装 | 在对应 git clone 路径下跑 `npm install` |
+| `Could not locate the bindings file` | native addon 未编译 | 确认顶层 `package.json` 有 `allowScripts`，重跑 `npm install` |
+| `Cannot find module 'better-sqlite3'` | 依赖没装 | 在对应 git clone 路径下跑 `npm install` |
 | 扩展加载成功但命令没注册 | 入口文件未在 `pi.extensions` 列出 | 检查顶层 `package.json` |
 
 ## 测试
 
 ```bash
-# pi-stats 的测试（需要 bun）
+# pi-stats 的测试（vitest，Node 运行时；better-sqlite3 无法在 bun 下加载）
 cd extensions/pi-stats
-TZ=UTC bun test
+TZ=UTC vitest run
 
 # pi-execution-time 的测试
 cd extensions/pi-execution-time
@@ -234,7 +242,7 @@ node --test tests/*.test.ts
 测试原则：
 
 - 优先测 store/纯逻辑层，mock pi 事件层
-- sql.js 的测试用 `mkdtempSync` 创建临时目录，测试完清理
+- store/DB 测试用 `mkdtempSync` 创建临时目录，测试完清理
 - WebSocket/进程级测试（如 pi-intercom）用独立的 broker startup 测试
 
 ## Fast Mode 设计模式（参考实现）

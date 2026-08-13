@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
-import initSqlJs, { type SqlJsStatic, type Database } from "sql.js";
+import Database from "better-sqlite3";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -46,62 +46,42 @@ export interface SkillStatsStore {
 	close(): void;
 }
 
-// ── SQL.js Store ───────────────────────────────────────────────────
+// ── SQLite Store ───────────────────────────────────────────────────
 
 const DEFAULT_DATA_DIR = join(homedir(), ".pi", "agent", "pi-skill-stats");
 const DB_FILENAME = "stats.sqlite";
-let sqlModule: SqlJsStatic | null = null;
-let sqlInitPromise: Promise<SqlJsStatic> | null = null;
-
-async function getSqlModule(): Promise<SqlJsStatic> {
-	if (sqlModule) return sqlModule;
-	if (!sqlInitPromise) sqlInitPromise = initSqlJs();
-	sqlModule = await sqlInitPromise;
-	return sqlModule;
-}
+// How long a write waits for another process to release its lock before giving
+// up. WAL + this timeout give us cross-process safety without any file locking
+// of our own: each insert is an atomic autocommit transaction.
+const BUSY_TIMEOUT_MS = 5000;
 
 export class SqlJsSkillStatsStore implements SkillStatsStore {
-	private db: Database;
-	private dbPath: string;
-	private savePending = false;
+	private db: Database.Database;
 	private closed = false;
 
-	private constructor(db: Database, dbPath: string) {
+	private constructor(db: Database.Database) {
 		this.db = db;
-		this.dbPath = dbPath;
 	}
 
-	/** Async factory — loads WASM + DB file. */
-	static async create(dataDir?: string): Promise<SqlJsSkillStatsStore> {
+	/** Opens the on-disk database in place (better-sqlite3 native addon). */
+	static create(dataDir?: string): SqlJsSkillStatsStore {
 		const dir = dataDir ?? DEFAULT_DATA_DIR;
 		mkdirSync(dir, { recursive: true });
-		const dbPath = join(dir, DB_FILENAME);
-
-		const SQL = await getSqlModule();
-		let db: Database;
-		if (existsSync(dbPath)) {
-			const buffer = readFileSync(dbPath);
-			db = new SQL.Database(buffer);
-		} else {
-			db = new SQL.Database();
-		}
-
+		const db = new Database(join(dir, DB_FILENAME));
+		configureDb(db);
 		initializeSchema(db);
-		const store = new SqlJsSkillStatsStore(db, dbPath);
-		store.saveSync();
-		return store;
+		return new SqlJsSkillStatsStore(db);
 	}
 
 	insert(event: UsageEvent): boolean {
 		const createdAt = event.createdAt ?? Math.floor(Date.now() / 1000);
 		try {
-			this.db.run(
-				"insert or ignore into skill_usage_events(skill, project, created_at, origin_key) values (?, ?, ?, ?)",
-				[event.skill, event.project, createdAt, event.originKey ?? null],
-			);
-			const changed = this.db.getRowsModified() > 0;
-			if (changed) this.save();
-			return changed;
+			const result = this.db
+				.prepare(
+					"insert or ignore into skill_usage_events(skill, project, created_at, origin_key) values (?, ?, ?, ?)",
+				)
+				.run(event.skill, event.project, createdAt, event.originKey ?? null);
+			return result.changes > 0;
 		} catch {
 			return false;
 		}
@@ -110,13 +90,12 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	insertTool(event: ToolUsageEvent): boolean {
 		const createdAt = event.createdAt ?? Math.floor(Date.now() / 1000);
 		try {
-			this.db.run(
-				"insert or ignore into tool_usage_events(tool, project, created_at, origin_key) values (?, ?, ?, ?)",
-				[event.tool, event.project, createdAt, event.originKey ?? null],
-			);
-			const changed = this.db.getRowsModified() > 0;
-			if (changed) this.save();
-			return changed;
+			const result = this.db
+				.prepare(
+					"insert or ignore into tool_usage_events(tool, project, created_at, origin_key) values (?, ?, ?, ?)",
+				)
+				.run(event.tool, event.project, createdAt, event.originKey ?? null);
+			return result.changes > 0;
 		} catch {
 			return false;
 		}
@@ -126,16 +105,17 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		const limit = options.limit ?? 20;
 		const where = options.project ? "where project = ?" : "";
 		const params: unknown[] = options.project ? [options.project, limit] : [limit];
-		const result = this.db.exec(
-			`select skill, count(*) as total, max(created_at) as lastUsed
-			 from skill_usage_events ${where}
-			 group by skill order by total desc, lastUsed desc, skill asc limit ?`,
-			params,
-		);
-		return parseRows<UsageAggregate>(result, (row) => ({
-			skill: String(row[0]),
-			total: Number(row[1]),
-			lastUsed: Number(row[2]),
+		const rows = this.db
+			.prepare(
+				`select skill, count(*) as total, max(created_at) as lastUsed
+				 from skill_usage_events ${where}
+				 group by skill order by total desc, lastUsed desc, skill asc limit ?`,
+			)
+			.all(...params) as Array<{ skill: string; total: number; lastUsed: number }>;
+		return rows.map((row) => ({
+			skill: row.skill,
+			total: Number(row.total),
+			lastUsed: Number(row.lastUsed),
 		}));
 	}
 
@@ -143,16 +123,17 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		const limit = options.limit ?? 20;
 		const where = options.project ? "where project = ?" : "";
 		const params: unknown[] = options.project ? [options.project, limit] : [limit];
-		const result = this.db.exec(
-			`select tool, count(*) as total, max(created_at) as lastUsed
-			 from tool_usage_events ${where}
-			 group by tool order by total desc, lastUsed desc, tool asc limit ?`,
-			params,
-		);
-		return parseRows<ToolUsageAggregate>(result, (row) => ({
-			tool: String(row[0]),
-			total: Number(row[1]),
-			lastUsed: Number(row[2]),
+		const rows = this.db
+			.prepare(
+				`select tool, count(*) as total, max(created_at) as lastUsed
+				 from tool_usage_events ${where}
+				 group by tool order by total desc, lastUsed desc, tool asc limit ?`,
+			)
+			.all(...params) as Array<{ tool: string; total: number; lastUsed: number }>;
+		return rows.map((row) => ({
+			tool: row.tool,
+			total: Number(row.total),
+			lastUsed: Number(row.lastUsed),
 		}));
 	}
 
@@ -174,54 +155,50 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		const params: unknown[] = options.project
 			? [options.name, options.project, limit]
 			: [options.name, limit];
-		const result = this.db.exec(
-			`select date(created_at, 'unixepoch', 'localtime') as bucket,
-			        count(*) as total,
-			        max(created_at) as lastUsed
-			 from ${table}
-			 where ${nameColumn} = ? ${projectClause}
-			 group by bucket
-			 order by lastUsed desc
-			 limit ?`,
-			params,
-		);
-		return parseRows<UsageTrendPoint>(result, (row) => ({
-			bucket: String(row[0]),
-			total: Number(row[1]),
+		const rows = this.db
+			.prepare(
+				`select date(created_at, 'unixepoch', 'localtime') as bucket,
+				        count(*) as total,
+				        max(created_at) as lastUsed
+				 from ${table}
+				 where ${nameColumn} = ? ${projectClause}
+				 group by bucket
+				 order by lastUsed desc
+				 limit ?`,
+			)
+			.all(...params) as Array<{ bucket: string; total: number }>;
+		return rows.map((row) => ({
+			bucket: String(row.bucket),
+			total: Number(row.total),
 		})).reverse();
 	}
 
 	close(): void {
-		this.closed = true;
-		this.saveSync();
-		this.db.close();
-	}
-
-	private save(): void {
-		if (this.savePending || this.closed) return;
-		this.savePending = true;
-		queueMicrotask(() => {
-			if (this.closed) return;
-			this.saveSync();
-		});
-	}
-
-	private saveSync(): void {
 		if (this.closed) return;
-		this.savePending = false;
+		this.closed = true;
 		try {
-			const data = this.db.export();
-			const tmp = this.dbPath + ".tmp";
-			writeFileSync(tmp, Buffer.from(data));
-			renameSync(tmp, this.dbPath);
-		} catch (error) {
-			console.error("pi-skill-stats: failed to save database", error);
+			this.db.close();
+		} catch {
+			// Already closed or in an unusable state; nothing to do.
 		}
 	}
 }
 
-function initializeSchema(db: Database): void {
-	db.run(`
+function configureDb(db: Database.Database): void {
+	try {
+		// WAL lets readers proceed while a writer commits, and shrinks the write
+		// lock to a single autocommit transaction.
+		db.pragma("journal_mode = WAL");
+	} catch {
+		// Read-only filesystems or network mounts may not support WAL; fall back
+		// to the default journal mode. busy_timeout below still serializes
+		// cross-process writers safely.
+	}
+	db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+}
+
+function initializeSchema(db: Database.Database): void {
+	db.exec(`
 		create table if not exists skill_usage_events(
 			id integer primary key,
 			skill text not null,
@@ -230,7 +207,7 @@ function initializeSchema(db: Database): void {
 			origin_key text
 		);
 	`);
-	db.run(`
+	db.exec(`
 		create table if not exists tool_usage_events(
 			id integer primary key,
 			tool text not null,
@@ -241,8 +218,8 @@ function initializeSchema(db: Database): void {
 	`);
 
 	// Migration: old source column with origin key normalization
-	const columns = db.exec("pragma table_info(skill_usage_events)");
-	const colNames = (columns[0]?.values ?? []).map((row) => row[0] as string);
+	const columns = db.prepare("pragma table_info(skill_usage_events)").all() as Array<{ name: string }>;
+	const colNames = columns.map((row) => row.name);
 	if (colNames.includes("source")) {
 		db.exec(`
 			alter table skill_usage_events rename to skill_usage_events_v1;
@@ -269,7 +246,7 @@ function initializeSchema(db: Database): void {
 	db.exec("create unique index if not exists idx_tool_usage_origin_key on tool_usage_events(origin_key) where origin_key is not null");
 }
 
-function migrateV1Rows(db: Database): void {
+function migrateV1Rows(db: Database.Database): void {
 	// Normalize origin keys: migrate :manual:/:agent:/:unknown: segments to the
 	// modern format and deduplicate by normalized origin key.
 	db.exec(`
@@ -291,21 +268,11 @@ function migrateV1Rows(db: Database): void {
 	db.exec("drop table skill_usage_events_v1");
 }
 
-function legacyV1TableExists(db: Database): boolean {
-	const rows = db.exec("select name from sqlite_master where type = 'table' and name = 'skill_usage_events_v1'");
-	return rows.length > 0 && rows[0].values.length > 0;
-}
-
-function parseRows<T>(
-	results: Array<{ columns: string[]; values: unknown[][] }>,
-	map: (row: unknown[]) => T,
-): T[] {
-	for (const r of results) {
-		if (r.values && r.values.length > 0) {
-			return r.values.map(map);
-		}
-	}
-	return [];
+function legacyV1TableExists(db: Database.Database): boolean {
+	const rows = db
+		.prepare("select name from sqlite_master where type = 'table' and name = 'skill_usage_events_v1'")
+		.all();
+	return rows.length > 0;
 }
 
 // Re-export under original name for backward compat

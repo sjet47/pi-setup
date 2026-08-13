@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { formatTimestamp, SkillStatsOverlay } from "../src/stats-overlay";
 import { SQLiteSkillStatsStore, type ToolUsageEvent, type UsageEvent } from "../src/store";
 

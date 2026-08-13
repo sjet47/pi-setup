@@ -7,7 +7,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["bun-types", "node"],
+    "types": ["node"],
     "noEmit": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"]

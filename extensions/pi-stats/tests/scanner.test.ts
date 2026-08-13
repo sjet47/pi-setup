@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { PiSkillRegistry } from "../src/registry";
 import {
 	renderScanResult,
