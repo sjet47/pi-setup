@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { parseSessionEntries, SessionManager, type FileEntry, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export interface PromptHistoryEntry {
@@ -12,24 +13,16 @@ export function currentSessionPrompts(sessionManager: { getEntries(): SessionEnt
 	return promptsFromEntries(sessionManager.getEntries(), sessionManager.getCwd());
 }
 
-export async function globalPrompts(): Promise<PromptHistoryEntry[]> {
-	const sessions = await SessionManager.listAll();
-	const prompts: PromptHistoryEntry[] = [];
-	const batchSize = 16;
-	for (let start = 0; start < sessions.length; start += batchSize) {
-		const batch = sessions.slice(start, start + batchSize);
-		const promptLists = await Promise.all(batch.map(async (session) => {
-			try {
-				const content = await readFile(session.path, "utf8");
-				return promptsFromEntries(parseSessionEntries(content), session.cwd);
-			} catch {
-				// A concurrently deleted or malformed session must not disable search.
-				return [];
-			}
-		}));
-		prompts.push(...promptLists.flat());
-	}
-	return sortAndDedupe(prompts);
+export async function projectPrompts(cwd: string, sessionDir?: string, excludePath?: string): Promise<PromptHistoryEntry[]> {
+	return promptsFromSessions(await SessionManager.list(cwd, sessionDir), excludePath);
+}
+
+export async function globalPrompts(excludePath?: string): Promise<PromptHistoryEntry[]> {
+	return promptsFromSessions(await SessionManager.listAll(), excludePath);
+}
+
+export function mergePrompts(...lists: PromptHistoryEntry[][]): PromptHistoryEntry[] {
+	return sortAndDedupe(lists.flat());
 }
 
 export function promptsFromEntries(entries: FileEntry[], cwd?: string): PromptHistoryEntry[] {
@@ -44,6 +37,27 @@ export function promptsFromEntries(entries: FileEntry[], cwd?: string): PromptHi
 			timestamp: timestampOf(entry.timestamp, entry.message.timestamp),
 			cwd,
 		});
+	}
+	return sortAndDedupe(prompts);
+}
+
+async function promptsFromSessions(sessions: Array<{ path: string; cwd: string }>, excludePath?: string): Promise<PromptHistoryEntry[]> {
+	const exclude = excludePath ? resolve(excludePath) : undefined;
+	const prompts: PromptHistoryEntry[] = [];
+	const batchSize = 16;
+	for (let start = 0; start < sessions.length; start += batchSize) {
+		const batch = sessions.slice(start, start + batchSize);
+		const promptLists = await Promise.all(batch.map(async (session) => {
+			if (exclude && resolve(session.path) === exclude) return [];
+			try {
+				const content = await readFile(session.path, "utf8");
+				return promptsFromEntries(parseSessionEntries(content), session.cwd);
+			} catch {
+				// A concurrently deleted or malformed session must not disable search.
+				return [];
+			}
+		}));
+		prompts.push(...promptLists.flat());
 	}
 	return sortAndDedupe(prompts);
 }

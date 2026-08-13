@@ -10,36 +10,43 @@ import {
 	type Component,
 	type Focusable,
 } from "@earendil-works/pi-tui";
-import type { PromptHistoryEntry } from "./history";
+import { mergePrompts, type PromptHistoryEntry } from "./history";
 
 const VISIBLE_ROWS = 7;
 const PREVIEW_LINES = 7;
 
-type PromptScope = "session" | "global";
+type PromptScope = "project" | "global";
 
 export class PromptSearchOverlay implements Component, Focusable {
 	private readonly searchInput = new Input();
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private projectEntries: PromptHistoryEntry[] = [];
+	private projectLoaded = false;
+	private projectLoading = false;
+	private projectError?: string;
 	private globalEntries?: PromptHistoryEntry[];
 	private globalLoading = false;
 	private globalError?: string;
 	private selectedIndex = 0;
 	private windowStart = 0;
-	private scope: PromptScope = "session";
+	private scope: PromptScope = "project";
 	private _focused = false;
 
 	constructor(
 		private readonly sessionEntries: PromptHistoryEntry[],
 		private readonly theme: Theme,
 		private readonly onDone: (prompt?: string) => void,
+		private readonly loadProject: () => Promise<PromptHistoryEntry[]>,
 		private readonly loadGlobal: () => Promise<PromptHistoryEntry[]>,
 		private readonly requestRender: () => void,
 		private readonly keybindings: KeybindingsManager,
 	) {
 		this.searchInput.onSubmit = () => this.selectCurrent();
 		this.searchInput.onEscape = () => this.onDone();
+		this.projectEntries = sessionEntries;
 		this.selectNewest();
+		this.ensureLoaded("project");
 	}
 
 	get focused(): boolean {
@@ -99,7 +106,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 		this.windowStart = clamp(this.windowStart, Math.max(0, this.selectedIndex - VISIBLE_ROWS + 1), this.selectedIndex);
 		this.windowStart = clamp(this.windowStart, 0, Math.max(0, prompts.length - VISIBLE_ROWS));
 
-		const scopeLabel = this.scope === "global" ? "everywhere" : "this session";
+		const scopeLabel = this.scope === "global" ? "everywhere" : "this project";
 		const visiblePrompts = prompts.slice(this.windowStart, this.windowStart + VISIBLE_ROWS);
 		const lines = [
 			this.border("top", width),
@@ -146,8 +153,8 @@ export class PromptSearchOverlay implements Component, Focusable {
 	}
 
 	private renderCompact(prompts: PromptHistoryEntry[], contentWidth: number): string[] {
-		if (this.globalLoading) return [this.line(this.theme.fg("muted", " Loading prompt history..."), contentWidth)];
-		if (this.globalError) return [this.line(this.theme.fg("warning", ` ${this.globalError}`), contentWidth)];
+		if (this.scopeLoading() && prompts.length === 0) return [this.line(this.theme.fg("muted", " Loading prompt history..."), contentWidth)];
+		if (this.scopeError() && prompts.length === 0) return [this.line(this.theme.fg("warning", ` ${this.scopeError()}`), contentWidth)];
 		if (prompts.length === 0) return [this.line(this.theme.fg("muted", " No matching prompts."), contentWidth)];
 		return prompts.map((prompt, index) => {
 			const absoluteIndex = this.windowStart + index;
@@ -156,8 +163,8 @@ export class PromptSearchOverlay implements Component, Focusable {
 	}
 
 	private previewLines(width: number): string[] {
-		if (this.globalLoading) return [this.theme.fg("muted", "Loading prompt history...")];
-		if (this.globalError) return [this.theme.fg("warning", this.globalError)];
+		if (this.scopeLoading() && !this.selectedPrompt()) return [this.theme.fg("muted", "Loading prompt history...")];
+		if (this.scopeError() && !this.selectedPrompt()) return [this.theme.fg("warning", this.scopeError() ?? "")];
 		const selected = this.selectedPrompt();
 		if (!selected) return [this.theme.fg("muted", "No matching prompts.")];
 
@@ -180,10 +187,10 @@ export class PromptSearchOverlay implements Component, Focusable {
 	}
 
 	private summary(count: number): string {
-		if (this.globalLoading) return "  loading...";
 		const total = this.entries().length;
 		const query = this.searchInput.getValue().trim();
-		return query ? `  ${count}/${total} matches` : `  ${total} prompts`;
+		const counts = query ? `  ${count}/${total} matches` : `  ${total} prompts`;
+		return this.scopeLoading() ? `${counts}  loading...` : counts;
 	}
 
 	private prompts(): PromptHistoryEntry[] {
@@ -193,7 +200,7 @@ export class PromptSearchOverlay implements Component, Focusable {
 	}
 
 	private entries(): PromptHistoryEntry[] {
-		return this.scope === "session" ? this.sessionEntries : (this.globalEntries ?? []);
+		return this.scope === "project" ? this.projectEntries : (this.globalEntries ?? this.sessionEntries);
 	}
 
 	private selectedPrompt(): PromptHistoryEntry | undefined {
@@ -220,18 +227,42 @@ export class PromptSearchOverlay implements Component, Focusable {
 	}
 
 	private toggleScope(): void {
-		this.scope = this.scope === "session" ? "global" : "session";
+		this.scope = this.scope === "project" ? "global" : "project";
 		this.selectNewest();
 		this.invalidate();
 		this.requestRender();
-		if (this.scope !== "global" || this.globalEntries || this.globalLoading) return;
+		this.ensureLoaded(this.scope);
+	}
 
+	private ensureLoaded(scope: PromptScope): void {
+		if (scope === "project") {
+			if (this.projectLoaded || this.projectLoading) return;
+			this.projectLoading = true;
+			void this.loadProject()
+				.then((entries) => {
+					this.projectEntries = mergePrompts(this.sessionEntries, entries);
+					this.projectError = undefined;
+					this.projectLoaded = true;
+					if (this.scope === "project") this.selectNewest();
+				})
+				.catch(() => {
+					this.projectError = "Could not load prompt history.";
+				})
+				.finally(() => {
+					this.projectLoading = false;
+					this.invalidate();
+					this.requestRender();
+				});
+			return;
+		}
+
+		if (this.globalEntries || this.globalLoading) return;
 		this.globalLoading = true;
 		void this.loadGlobal()
 			.then((entries) => {
-				this.globalEntries = entries;
+				this.globalEntries = mergePrompts(this.sessionEntries, entries);
 				this.globalError = undefined;
-				this.selectNewest();
+				if (this.scope === "global") this.selectNewest();
 			})
 			.catch(() => {
 				this.globalError = "Could not load prompt history.";
@@ -241,6 +272,14 @@ export class PromptSearchOverlay implements Component, Focusable {
 				this.invalidate();
 				this.requestRender();
 			});
+	}
+
+	private scopeLoading(): boolean {
+		return this.scope === "project" ? this.projectLoading : this.globalLoading;
+	}
+
+	private scopeError(): string | undefined {
+		return this.scope === "project" ? this.projectError : this.globalError;
 	}
 
 	private cell(text: string, width: number): string {

@@ -1,16 +1,20 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { currentSessionPrompts, globalPrompts } from "./history";
+import { currentSessionPrompts, globalPrompts, projectPrompts } from "./history";
 import { PromptSearchOverlay } from "./overlay";
 
 async function openPromptSearch(ctx: ExtensionContext): Promise<void> {
+	const session = ctx.sessionManager;
+	const current = currentSessionPrompts(session);
+	const sessionFile = session.getSessionFile();
 
 	const selected = await ctx.ui.custom<string | undefined>(
 		(tui, theme, keybindings, done) => {
 			const overlay = new PromptSearchOverlay(
-				currentSessionPrompts(ctx.sessionManager),
+				current,
 				theme,
 				done,
-				globalPrompts,
+				() => projectPrompts(session.getCwd(), session.getSessionDir(), sessionFile),
+				() => globalPrompts(sessionFile),
 				() => tui.requestRender(),
 				keybindings,
 			);
