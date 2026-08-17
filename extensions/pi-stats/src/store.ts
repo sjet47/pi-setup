@@ -57,10 +57,13 @@ const BUSY_TIMEOUT_MS = 5000;
 
 export class SqlJsSkillStatsStore implements SkillStatsStore {
 	private db: Database.Database;
+	private dbPath: string;
 	private closed = false;
+	private checked = false;
 
-	private constructor(db: Database.Database) {
+	private constructor(db: Database.Database, dbPath: string) {
 		this.db = db;
+		this.dbPath = dbPath;
 	}
 
 	/** Opens the on-disk database in place (better-sqlite3 native addon). */
@@ -72,17 +75,11 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		let db: Database.Database | undefined;
 		try {
 			db = new Database(dbPath);
-			db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
-			if (databaseIsHealthy(db)) {
-				configureDb(db);
-				initializeSchema(db);
-				const store = new SqlJsSkillStatsStore(db);
-				db = undefined;
-				return store;
-			}
-			db.close();
+			configureDb(db);
+			initializeSchema(db);
+			const store = new SqlJsSkillStatsStore(db, dbPath);
 			db = undefined;
-			recoverCorruptDatabase(dbPath);
+			return store;
 		} catch (error) {
 			try {
 				db?.close();
@@ -96,12 +93,32 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		db = new Database(dbPath);
 		configureDb(db);
 		initializeSchema(db);
-		return new SqlJsSkillStatsStore(db);
+		return new SqlJsSkillStatsStore(db, dbPath);
+	}
+
+	private ensureUsable(): void {
+		if (this.checked) return;
+		if (databaseIsHealthy(this.db)) {
+			this.checked = true;
+			return;
+		}
+
+		try {
+			this.db.close();
+		} catch {
+			// The file is being replaced; ignore close errors from it.
+		}
+		recoverCorruptDatabase(this.dbPath);
+		this.db = new Database(this.dbPath);
+		configureDb(this.db);
+		initializeSchema(this.db);
+		this.checked = true;
 	}
 
 	insert(event: UsageEvent): boolean {
 		const createdAt = event.createdAt ?? Math.floor(Date.now() / 1000);
 		try {
+			this.ensureUsable();
 			const result = this.db
 				.prepare(
 					"insert or ignore into skill_usage_events(skill, project, created_at, origin_key) values (?, ?, ?, ?)",
@@ -116,6 +133,7 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	insertTool(event: ToolUsageEvent): boolean {
 		const createdAt = event.createdAt ?? Math.floor(Date.now() / 1000);
 		try {
+			this.ensureUsable();
 			const result = this.db
 				.prepare(
 					"insert or ignore into tool_usage_events(tool, project, created_at, origin_key) values (?, ?, ?, ?)",
@@ -128,6 +146,7 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	}
 
 	queryTop(options: { project?: string; limit?: number }): UsageAggregate[] {
+		this.ensureUsable();
 		const limit = options.limit ?? 20;
 		const where = options.project ? "where project = ?" : "";
 		const params: unknown[] = options.project ? [options.project, limit] : [limit];
@@ -146,6 +165,7 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	}
 
 	queryTopTools(options: { project?: string; limit?: number }): ToolUsageAggregate[] {
+		this.ensureUsable();
 		const limit = options.limit ?? 20;
 		const where = options.project ? "where project = ?" : "";
 		const params: unknown[] = options.project ? [options.project, limit] : [limit];
@@ -164,10 +184,12 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	}
 
 	querySkillTrend(options: { skill: string; project?: string; limit?: number }): UsageTrendPoint[] {
+		this.ensureUsable();
 		return this.queryTrend("skill_usage_events", "skill", { name: options.skill, project: options.project, limit: options.limit });
 	}
 
 	queryToolTrend(options: { tool: string; project?: string; limit?: number }): UsageTrendPoint[] {
+		this.ensureUsable();
 		return this.queryTrend("tool_usage_events", "tool", { name: options.tool, project: options.project, limit: options.limit });
 	}
 
