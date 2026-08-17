@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TpsScale } from "./src/types";
 import { SQLiteTpsStatsStore, type TpsStatsStore } from "./src/store";
@@ -158,7 +159,22 @@ export default function (pi: ExtensionAPI) {
 
     await ctx.ui.custom<null>(
       (tui, theme, _keybindings, done) => {
-        const overlay = new TpsStatsOverlay(rows, themeToOverlayTheme(theme), () => done(null), getTrend);
+        let closed = false;
+        let unsubscribeInput: (() => void) | undefined;
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          unsubscribeInput?.();
+          done(null);
+        };
+        unsubscribeInput = tui.addInputListener((data) => {
+          if (matchesKey(data, Key.escape)) {
+            close();
+            return { consume: true };
+          }
+          return undefined;
+        });
+        const overlay = new TpsStatsOverlay(rows, themeToOverlayTheme(theme), close, getTrend);
         return {
           get focused() {
             return overlay.focused;
@@ -171,6 +187,9 @@ export default function (pi: ExtensionAPI) {
           handleInput: (data: string) => {
             overlay.handleInput(data);
             tui.requestRender();
+          },
+          dispose: () => {
+            unsubscribeInput?.();
           },
         };
       },

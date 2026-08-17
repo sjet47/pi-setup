@@ -214,6 +214,8 @@ export class TpsStatsOverlay implements Component, Focusable {
     const levelWidth = Math.max(12, Math.floor(contentWidth * 0.4));
     const samplesWidth = 8;
     const tokensWidth = Math.max(10, contentWidth - levelWidth - samplesWidth - 8);
+    const header = `${this.cell("level", levelWidth)} ${this.cell("n", samplesWidth, "right")} ${this.cell("avg tokens", tokensWidth, "right")}`;
+    lines.push(this.line(this.theme.fg("borderMuted", header), contentWidth));
     for (const level of levels) {
       lines.push(
         this.line(
