@@ -259,11 +259,13 @@ export class TpsStatsOverlay implements Component, Focusable {
   }
 
   private renderTable(rows: ModelTpsSummary[], contentWidth: number): string[] {
-    const providerWidth = Math.max(10, Math.floor(contentWidth * 0.22));
-    const modelWidth = Math.max(12, Math.floor(contentWidth * 0.30));
     const samplesWidth = 6;
     const tpsWidth = 9;
-    const lastWidth = Math.max(10, contentWidth - providerWidth - modelWidth - samplesWidth - tpsWidth - 12);
+    const lastWidth = Math.max(10, Math.min(19, Math.floor(contentWidth * 0.16)));
+    const fixedWidth = 2 + 12 + samplesWidth + tpsWidth + lastWidth;
+    const available = Math.max(22, contentWidth - fixedWidth);
+    const providerWidth = Math.max(10, Math.floor(available * 0.4));
+    const modelWidth = Math.max(12, available - providerWidth);
 
     const header = this.cell("", 2) +
       this.cell("provider", providerWidth) +
@@ -271,7 +273,7 @@ export class TpsStatsOverlay implements Component, Focusable {
       " │ " + this.cell("n", samplesWidth, "right") +
       " │ " + this.cell("avg tps", tpsWidth, "right") +
       " │ " + this.cell("last seen", lastWidth);
-    const rule = [2, providerWidth, modelWidth, samplesWidth, tpsWidth, lastWidth]
+    const rule = [2 + providerWidth, modelWidth, samplesWidth, tpsWidth, lastWidth]
       .map((columnWidth) => "─".repeat(columnWidth))
       .join("─┼─");
 
@@ -287,7 +289,7 @@ export class TpsStatsOverlay implements Component, Focusable {
         " │ " + this.cell(truncate(row.model, modelWidth), modelWidth) +
         " │ " + this.cell(String(row.samples), samplesWidth, "right") +
         " │ " + this.cell(formatTps(row.avgTps), tpsWidth, "right") +
-        " │ " + this.cell(formatTimestamp(row.lastSeen, lastWidth <= 18 ? "short" : "long"), lastWidth);
+        " │ " + this.cell(formatTimestamp(row.lastSeen, lastWidth <= 16 ? "short" : "long"), lastWidth);
       lines.push(this.line(values, contentWidth));
     }
     return lines;
@@ -385,14 +387,6 @@ function formatInt(value: number): string {
   return Math.round(value).toString();
 }
 
-function formatTimestamp(timestamp: number, variant: "short" | "long" = "long"): string {
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
-  const date = new Date(timestamp * 1000);
-  const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
-  if (variant === "short") return day;
-  return `${day} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-}
-
 function formatBucket(timestamp: number, scale: TpsScale): string {
   const date = new Date(timestamp);
   if (scale === "hour") {
@@ -404,6 +398,14 @@ function formatBucket(timestamp: number, scale: TpsScale): string {
     return `${day} ~ ${end.getFullYear()}-${pad2(end.getMonth() + 1)}-${pad2(end.getDate())}`;
   }
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function formatTimestamp(timestamp: number, variant: "short" | "long" = "long"): string {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
+  const date = new Date(timestamp * 1000);
+  const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+  if (variant === "short") return day;
+  return `${day} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 
 function truncate(value: string, width: number): string {

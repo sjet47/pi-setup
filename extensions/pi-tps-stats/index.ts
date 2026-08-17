@@ -52,6 +52,10 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  pi.on("session_start", async (_event, ctx) => {
+    await ensureStore(ctx);
+  });
+
   pi.on("before_provider_request", () => {
     requestSentAt = Date.now();
   });
@@ -85,7 +89,9 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("message_end", async (event, _ctx) => {
+  pi.on("message_end", async (event, ctx) => {
+    const activeStore = await ensureStore(ctx);
+    if (!activeStore) return;
     const message = event.message;
     if (message.role !== "assistant") return;
     if (!tracked) return;
@@ -109,7 +115,7 @@ export default function (pi: ExtensionAPI) {
       const originKey = responseId
         ? `msg:${responseId}`
         : `msg:${sha1(`${tracked.provider}|${tracked.model}|${createdAt}|${messageFingerprint(message.content)}`)}`;
-      store?.insertSample({
+      activeStore.insertSample({
         provider: tracked.provider,
         model: tracked.model,
         project: tracked.project,
