@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import Database from "better-sqlite3";
 import { formatTimestamp, SkillStatsOverlay } from "../src/stats-overlay";
 import { SQLiteSkillStatsStore, type ToolUsageEvent, type UsageEvent } from "../src/store";
 
@@ -100,7 +101,7 @@ function createFakeDatabase(columns: Array<{ name: string }> = [
 	return db;
 }
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -185,6 +186,42 @@ describe("SQLiteSkillStatsStore", () => {
 		// Real store always initializes the modern schema; no mock to inspect
 		store.insert({ skill: "tdd", project: "/a", createdAt: 10 });
 		expect(store.queryTop({ project: "/a" }).length).toBe(1);
+	});
+
+	test("recovers an unreadable database file at startup", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-stats-test-"));
+		writeFileSync(join(dir, "stats.sqlite"), "not a sqlite database");
+
+		const store = SQLiteSkillStatsStore.create(dir);
+		expect(store.queryTop({})).toEqual([]);
+		expect(store.queryTopTools({})).toEqual([]);
+		expect(readdirSync(dir).some((file) => file.startsWith("stats.sqlite.corrupt-"))).toBe(true);
+		store.close();
+	});
+
+	test("recovers a malformed database that still opens", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-stats-test-"));
+		const store = SQLiteSkillStatsStore.create(dir);
+		for (let i = 0; i < 500; i += 1) {
+			store.insertTool({ tool: "read", project: "/a", createdAt: 1000 + i });
+		}
+		store.close();
+
+		const dbPath = join(dir, "stats.sqlite");
+		const checkpoint = new Database(dbPath);
+		checkpoint.pragma("wal_checkpoint(TRUNCATE)");
+		checkpoint.close();
+
+		const bytes = readFileSync(dbPath);
+		bytes[4096 * 2 + 12] = 0xff;
+		bytes[4096 * 2 + 13] = 0xff;
+		writeFileSync(dbPath, bytes);
+
+		const recovered = SQLiteSkillStatsStore.create(dir);
+		expect(() => recovered.queryTopTools({})).not.toThrow();
+		expect(recovered.insertTool({ tool: "bash", project: "/a", createdAt: 20 })).toBe(true);
+		expect(readdirSync(dir).some((file) => file.startsWith("stats.sqlite.corrupt-"))).toBe(true);
+		recovered.close();
 	});
 });
 

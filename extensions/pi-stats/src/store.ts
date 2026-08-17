@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import Database from "better-sqlite3";
@@ -67,7 +67,33 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 	static create(dataDir?: string): SqlJsSkillStatsStore {
 		const dir = dataDir ?? DEFAULT_DATA_DIR;
 		mkdirSync(dir, { recursive: true });
-		const db = new Database(join(dir, DB_FILENAME));
+		const dbPath = join(dir, DB_FILENAME);
+
+		let db: Database.Database | undefined;
+		try {
+			db = new Database(dbPath);
+			db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+			if (databaseIsHealthy(db)) {
+				configureDb(db);
+				initializeSchema(db);
+				const store = new SqlJsSkillStatsStore(db);
+				db = undefined;
+				return store;
+			}
+			db.close();
+			db = undefined;
+			recoverCorruptDatabase(dbPath);
+		} catch (error) {
+			try {
+				db?.close();
+			} catch {
+				// The file is being replaced; ignore close errors from it.
+			}
+			if (isLockedError(error)) throw error;
+			recoverCorruptDatabase(dbPath);
+		}
+
+		db = new Database(dbPath);
 		configureDb(db);
 		initializeSchema(db);
 		return new SqlJsSkillStatsStore(db);
@@ -181,6 +207,118 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		} catch {
 			// Already closed or in an unusable state; nothing to do.
 		}
+	}
+}
+
+function databaseIsHealthy(db: Database.Database): boolean {
+	try {
+		return db.pragma("quick_check", { simple: true }) === "ok";
+	} catch (error) {
+		if (isLockedError(error)) throw error;
+		return false;
+	}
+}
+
+function isLockedError(error: unknown): boolean {
+	return error instanceof Error
+		&& "code" in error
+		&& ["SQLITE_BUSY", "SQLITE_LOCKED"].includes((error as { code?: string }).code ?? "");
+}
+
+function recoverCorruptDatabase(dbPath: string): void {
+	const backupPath = backupDatabaseFile(dbPath);
+	removeStaleSidecars(dbPath);
+	rmSync(dbPath, { force: true });
+
+	const target = new Database(dbPath);
+	try {
+		configureDb(target);
+		initializeSchema(target);
+		if (existsSync(backupPath)) {
+			try {
+				const source = new Database(backupPath, { readonly: true });
+				try {
+					copyRecoverableRows(source, target);
+				} finally {
+					source.close();
+				}
+			} catch {
+				// The backup may be too damaged to open; keep the fresh database.
+			}
+		}
+	} finally {
+		try {
+			target.pragma("wal_checkpoint(TRUNCATE)");
+		} catch {
+			// Non-WAL or read-only fallback; close without checkpointing.
+		}
+		target.close();
+	}
+	removeStaleSidecars(dbPath);
+}
+
+function backupDatabaseFile(dbPath: string): string {
+	const backupPath = `${dbPath}.corrupt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	if (existsSync(dbPath)) copyFileSync(dbPath, backupPath);
+	const walPath = `${dbPath}-wal`;
+	if (existsSync(walPath)) copyFileSync(walPath, `${backupPath}-wal`);
+	return backupPath;
+}
+
+function removeStaleSidecars(dbPath: string): void {
+	for (const suffix of ["-wal", "-shm"]) {
+		try {
+			rmSync(`${dbPath}${suffix}`, { force: true });
+		} catch {
+			// Best effort cleanup; the database itself is still usable.
+		}
+	}
+}
+
+function copyRecoverableRows(source: Database.Database, target: Database.Database): void {
+	copyTableRows(source, target, "skill_usage_events", "skill");
+	copyTableRows(source, target, "tool_usage_events", "tool");
+}
+
+function copyTableRows(
+	source: Database.Database,
+	target: Database.Database,
+	table: string,
+	nameColumn: string,
+): void {
+	let columns: string[] = [];
+	try {
+		columns = (source.prepare(`pragma table_info(${table})`).all() as Array<{ name: string }>)
+			.map((row) => row.name);
+	} catch {
+		return;
+	}
+
+	const idColumn = columns.includes("id") ? "id" : undefined;
+	const name = columns.includes(nameColumn) ? nameColumn : undefined;
+	const project = columns.includes("project") ? "project" : undefined;
+	const createdAt = columns.includes("created_at") ? "created_at" : undefined;
+	const originKey = columns.includes("origin_key") ? "origin_key" : undefined;
+	if (!name || !project || !createdAt) return;
+
+	const columnsToCopy = [idColumn, name, project, createdAt, originKey]
+		.filter((column): column is string => Boolean(column));
+	const placeholders = columnsToCopy.map(() => "?").join(", ");
+
+	try {
+		const select = source.prepare(`select ${columnsToCopy.join(", ")} from ${table}`);
+		const insert = target.prepare(
+			`insert or ignore into ${table}(${columnsToCopy.join(", ")}) values (${placeholders})`,
+		);
+		for (const row of select.iterate() as IterableIterator<Record<string, unknown>>) {
+			try {
+				insert.run(...columnsToCopy.map((column) => row[column] ?? null));
+			} catch {
+				// Skip individual unreadable or invalid rows.
+			}
+		}
+	} catch {
+		// Keep whatever rows were copied before the malformed section.
 	}
 }
 
