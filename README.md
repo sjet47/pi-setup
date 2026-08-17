@@ -30,6 +30,7 @@ pi install git:github.com/sjet47/pi-setup@v0.1.0
 | `pi-inline-skill/` | Highlight `$skill` aliases and route inline skill references via `/skill:name` | [pi-inline-skill-identifier](https://github.com/kaushikgopal/pi-kaush/tree/main/extensions/pi-inline-skill-identifier) |
 | `pi-wakatime/` | Track Pi sessions, file activity and AI line changes with WakaTime | [ttttmr/pi-wakatime](https://github.com/ttttmr/pi-wakatime) |
 | `pi-cache-graph/` | Inspect context-cache hit rates, token statistics, and export CSV data | [championswimmer/pi-cache-graph](https://github.com/championswimmer/pi-cache-graph) |
+| `pi-tps-stats/` | Track live provider/model TPS trends: TTFT, throughput, thinking tokens | [local] |
 
 ## Selective Loading
 
