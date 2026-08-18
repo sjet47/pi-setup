@@ -39,11 +39,12 @@ describe("extension", () => {
 		skillStatsExtension(pi);
 		expect(registeredCommands.has("skill-stats")).toBe(true);
 		expect(registeredCommands.has("tool-stats")).toBe(true);
+		expect(registeredCommands.has("tps-stats")).toBe(true);
 	});
 
 	test("fails open when database init fails", async () => {
-		const oldEnv = process.env.PI_SKILL_STATS_DIR;
-		process.env.PI_SKILL_STATS_DIR = "/dev/null/stats.sqlite";
+		const oldEnv = process.env.PI_STATS_DIR;
+		process.env.PI_STATS_DIR = "/dev/null/stats.sqlite";
 		try {
 			const { pi, handlers } = createPi([
 				{ name: "tdd", source: "skill", sourceInfo: { path: "/skills/tdd/SKILL.md" } },
@@ -51,16 +52,16 @@ describe("extension", () => {
 			const { ctx, notifications } = createCtx();
 			skillStatsExtension(pi);
 			await handlers.get("input")![0]({ source: "interactive", text: "/skill:tdd" }, ctx);
-			expect(notifications[0].message).toContain("pi-skill-stats disabled");
+			expect(notifications[0].message).toContain("pi-stats disabled");
 		} finally {
-			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DIR;
-			else process.env.PI_SKILL_STATS_DIR = oldEnv;
+			if (oldEnv === undefined) delete process.env.PI_STATS_DIR;
+			else process.env.PI_STATS_DIR = oldEnv;
 		}
 	});
 
 	test("attempts to record skill calls from extension-sourced expanded messages", async () => {
-		const oldEnv = process.env.PI_SKILL_STATS_DIR;
-		process.env.PI_SKILL_STATS_DIR = "/dev/null/stats.sqlite";
+		const oldEnv = process.env.PI_STATS_DIR;
+		process.env.PI_STATS_DIR = "/dev/null/stats.sqlite";
 		try {
 			const { pi, handlers } = createPi([
 				{ name: "diagnose", source: "skill", sourceInfo: { path: "/skills/diagnose/SKILL.md" } },
@@ -72,16 +73,16 @@ describe("extension", () => {
 				text: '<skill name="diagnose" location="/skills/diagnose/SKILL.md">',
 			}, ctx);
 
-			expect(notifications[0].message).toContain("pi-skill-stats disabled");
+			expect(notifications[0].message).toContain("pi-stats disabled");
 		} finally {
-			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DIR;
-			else process.env.PI_SKILL_STATS_DIR = oldEnv;
+			if (oldEnv === undefined) delete process.env.PI_STATS_DIR;
+			else process.env.PI_STATS_DIR = oldEnv;
 		}
 	});
 
 	test("reports disabled store in command handlers", async () => {
-		const oldEnv = process.env.PI_SKILL_STATS_DIR;
-		process.env.PI_SKILL_STATS_DIR = "/dev/null/stats.sqlite";
+		const oldEnv = process.env.PI_STATS_DIR;
+		process.env.PI_STATS_DIR = "/dev/null/stats.sqlite";
 		try {
 			const { pi, registeredCommands } = createPi();
 			const { ctx, notifications } = createCtx();
@@ -89,17 +90,17 @@ describe("extension", () => {
 			await registeredCommands.get("skill-stats").handler("", ctx);
 
 			expect(notifications.map((item) => item.message)).toContain(
-				"pi-skill-stats is disabled; check the earlier warning for details.",
+				"pi-stats is disabled; check the earlier warning for details.",
 			);
 		} finally {
-			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DIR;
-			else process.env.PI_SKILL_STATS_DIR = oldEnv;
+			if (oldEnv === undefined) delete process.env.PI_STATS_DIR;
+			else process.env.PI_STATS_DIR = oldEnv;
 		}
 	});
 
 	test("reports disabled store in tool-stats command handlers", async () => {
-		const oldEnv = process.env.PI_SKILL_STATS_DIR;
-		process.env.PI_SKILL_STATS_DIR = "/dev/null/stats.sqlite";
+		const oldEnv = process.env.PI_STATS_DIR;
+		process.env.PI_STATS_DIR = "/dev/null/stats.sqlite";
 		try {
 			const { pi, registeredCommands } = createPi();
 			const { ctx, notifications } = createCtx();
@@ -107,11 +108,11 @@ describe("extension", () => {
 			await registeredCommands.get("tool-stats").handler("", ctx);
 
 			expect(notifications.map((item) => item.message)).toContain(
-				"pi-skill-stats is disabled; check the earlier warning for details.",
+				"pi-stats is disabled; check the earlier warning for details.",
 			);
 		} finally {
-			if (oldEnv === undefined) delete process.env.PI_SKILL_STATS_DIR;
-			else process.env.PI_SKILL_STATS_DIR = oldEnv;
+			if (oldEnv === undefined) delete process.env.PI_STATS_DIR;
+			else process.env.PI_STATS_DIR = oldEnv;
 		}
 	});
 });

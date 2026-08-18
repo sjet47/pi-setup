@@ -1,6 +1,9 @@
 import type { Component, Focusable } from "@earendil-works/pi-tui";
 import { fuzzyFilter, Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { border as borderText, cell as cellText, clamp, formatTimestamp, line as lineText, type StatsOverlayTheme } from "./overlay-common";
 import type { ToolUsageAggregate, UsageAggregate, UsageTrendPoint } from "./store";
+
+export { formatTimestamp };
 
 export type StatsScope = "project" | "all";
 export type StatsKind = "skill" | "tool";
@@ -8,11 +11,6 @@ type UsageStatsRow = UsageAggregate | ToolUsageAggregate;
 type OverlayMode = "list" | "detail";
 
 const VISIBLE_ROWS = 20;
-
-interface SkillStatsTableTheme {
-	fg(color: "accent" | "border" | "borderMuted" | "dim" | "muted" | "success" | "warning", text: string): string;
-	bold(text: string): string;
-}
 
 export class SkillStatsOverlay implements Component, Focusable {
 	private readonly searchInput = new Input();
@@ -27,7 +25,7 @@ export class SkillStatsOverlay implements Component, Focusable {
 	constructor(
 		private readonly rows: UsageStatsRow[],
 		private readonly scope: StatsScope,
-		private readonly theme: SkillStatsTableTheme,
+		private readonly theme: StatsOverlayTheme,
 		initialQuery: string,
 		private readonly onClose: () => void,
 		private readonly kind: StatsKind = "skill",
@@ -261,36 +259,14 @@ export class SkillStatsOverlay implements Component, Focusable {
 	}
 
 	private cell(value: string, width: number, align: "left" | "right" = "left"): string {
-		const truncated = truncateToWidth(value, width, "…");
-		const padding = " ".repeat(Math.max(0, width - visibleWidth(truncated)));
-		return align === "right" ? padding + truncated : truncated + padding;
+		return cellText(value, width, align);
 	}
 
 	private line(content: string, contentWidth: number): string {
-		const truncated = truncateToWidth(content, contentWidth, "…");
-		const padding = " ".repeat(Math.max(0, contentWidth - visibleWidth(truncated)));
-		return this.theme.fg("border", "│") + " " + truncated + padding + " " + this.theme.fg("border", "│");
+		return lineText(this.theme, content, contentWidth);
 	}
 
 	private border(position: "top" | "bottom", width: number): string {
-		const left = position === "top" ? "╭" : "╰";
-		const right = position === "top" ? "╮" : "╯";
-		return this.theme.fg("border", left + "─".repeat(Math.max(0, width - 2)) + right);
+		return borderText(this.theme, position, width);
 	}
-}
-
-export function formatTimestamp(timestamp: number, variant: "long" | "short" = "long"): string {
-	if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
-	const date = new Date(timestamp * 1000);
-	const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
-	if (variant === "short") return day;
-	return `${day} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-}
-
-function pad2(value: number): string {
-	return String(value).padStart(2, "0");
-}
-
-function clamp(value: number, min: number, max: number): number {
-	return Math.max(min, Math.min(max, value));
 }

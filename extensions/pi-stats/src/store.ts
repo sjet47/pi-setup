@@ -2,6 +2,15 @@ import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import Database from "better-sqlite3";
+import { configureDb } from "./sqlite";
+import { aggregateThinkingLevels, aggregateTrend } from "./tps/aggregate";
+import type {
+  ModelTpsSummary,
+  TpsRawEvent,
+  TpsSample,
+  TpsTrendOptions,
+  TpsTrendResult,
+} from "./tps/types";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -46,16 +55,25 @@ export interface SkillStatsStore {
 	close(): void;
 }
 
+export interface TpsStatsStore {
+	insertSample(sample: TpsSample): boolean;
+	listModels(): ModelTpsSummary[];
+	queryTrend(options: TpsTrendOptions): TpsTrendResult;
+	close(): void;
+}
+
+export interface StatsStore extends SkillStatsStore, TpsStatsStore {}
+
 // ── SQLite Store ───────────────────────────────────────────────────
 
-const DEFAULT_DATA_DIR = join(homedir(), ".pi", "agent", "pi-skill-stats");
+const DEFAULT_DATA_DIR = join(homedir(), ".pi", "agent", "pi-stats");
 const DB_FILENAME = "stats.sqlite";
-// How long a write waits for another process to release its lock before giving
-// up. WAL + this timeout give us cross-process safety without any file locking
-// of our own: each insert is an atomic autocommit transaction.
-const BUSY_TIMEOUT_MS = 5000;
+const DEFAULT_SINCE_DAYS = 90;
+const DEFAULT_EVENT_LIMIT = 20_000;
+// WAL + busy_timeout give us cross-process safety without any file locking of
+// our own: each insert is an atomic autocommit transaction.
 
-export class SqlJsSkillStatsStore implements SkillStatsStore {
+export class SqlJsStatsStore implements StatsStore {
 	private db: Database.Database;
 	private dbPath: string;
 	private closed = false;
@@ -66,8 +84,8 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		this.dbPath = dbPath;
 	}
 
-	/** Opens the on-disk database in place (better-sqlite3 native addon). */
-	static create(dataDir?: string): SqlJsSkillStatsStore {
+	/** Opens the unified on-disk database in place (better-sqlite3 native addon). */
+	static create(dataDir?: string): SqlJsStatsStore {
 		const dir = dataDir ?? DEFAULT_DATA_DIR;
 		mkdirSync(dir, { recursive: true });
 		const dbPath = join(dir, DB_FILENAME);
@@ -77,7 +95,7 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 			db = new Database(dbPath);
 			configureDb(db);
 			initializeSchema(db);
-			const store = new SqlJsSkillStatsStore(db, dbPath);
+			const store = new SqlJsStatsStore(db, dbPath);
 			db = undefined;
 			return store;
 		} catch (error) {
@@ -93,7 +111,7 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 		db = new Database(dbPath);
 		configureDb(db);
 		initializeSchema(db);
-		return new SqlJsSkillStatsStore(db, dbPath);
+		return new SqlJsStatsStore(db, dbPath);
 	}
 
 	private ensureUsable(): void {
@@ -185,15 +203,15 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 
 	querySkillTrend(options: { skill: string; project?: string; limit?: number }): UsageTrendPoint[] {
 		this.ensureUsable();
-		return this.queryTrend("skill_usage_events", "skill", { name: options.skill, project: options.project, limit: options.limit });
+		return this.queryUsageTrend("skill_usage_events", "skill", { name: options.skill, project: options.project, limit: options.limit });
 	}
 
 	queryToolTrend(options: { tool: string; project?: string; limit?: number }): UsageTrendPoint[] {
 		this.ensureUsable();
-		return this.queryTrend("tool_usage_events", "tool", { name: options.tool, project: options.project, limit: options.limit });
+		return this.queryUsageTrend("tool_usage_events", "tool", { name: options.tool, project: options.project, limit: options.limit });
 	}
 
-	private queryTrend(
+	private queryUsageTrend(
 		table: string,
 		nameColumn: string,
 		options: { name: string; project?: string; limit?: number },
@@ -219,6 +237,115 @@ export class SqlJsSkillStatsStore implements SkillStatsStore {
 			bucket: String(row.bucket),
 			total: Number(row.total),
 		})).reverse();
+	}
+
+	insertSample(sample: TpsSample): boolean {
+		try {
+			this.ensureUsable();
+			const result = this.db
+				.prepare(
+					`insert or ignore into tps_samples(
+            provider, model, thinking_level, project, created_at,
+            ttft_ms, duration_ms, output_tokens, reasoning_tokens, origin_key
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.run(
+					sample.provider,
+					sample.model,
+					sample.thinkingLevel || "unknown",
+					sample.project,
+					sample.createdAt,
+					sample.ttftMs,
+					sample.durationMs,
+					sample.outputTokens,
+					sample.reasoningTokens,
+					sample.originKey ?? null,
+				);
+			return result.changes > 0;
+		} catch {
+			return false;
+		}
+	}
+
+	listModels(): ModelTpsSummary[] {
+		this.ensureUsable();
+		const rows = this.db
+			.prepare(
+				`select
+           provider,
+           model,
+           count(*) as samples,
+           max(created_at) as lastSeen,
+           avg(ttft_ms) as avgTtftMs,
+           sum(output_tokens) * 1000.0 / nullif(sum(duration_ms), 0) as avgTps,
+           avg(reasoning_tokens) as avgThinkingTokens
+         from tps_samples
+         group by provider, model
+         order by lastSeen desc, samples desc`,
+			)
+			.all() as Array<{
+			provider: string;
+			model: string;
+			samples: number;
+			lastSeen: number;
+			avgTtftMs: number;
+			avgTps: number;
+			avgThinkingTokens: number;
+		}>;
+		return rows.map((row) => ({
+			provider: row.provider,
+			model: row.model,
+			samples: Number(row.samples),
+			lastSeen: Number(row.lastSeen),
+			avgTtftMs: Number(row.avgTtftMs),
+			avgTps: Number(row.avgTps),
+			avgThinkingTokens: Number(row.avgThinkingTokens),
+		}));
+	}
+
+	queryTrend(options: TpsTrendOptions): TpsTrendResult {
+		this.ensureUsable();
+		const sinceSeconds = options.since ?? Math.floor((Date.now() - DEFAULT_SINCE_DAYS * 24 * 60 * 60 * 1000) / 1000);
+		const limit = options.limit ?? DEFAULT_EVENT_LIMIT;
+		const rows = this.db
+			.prepare(
+				`select
+           created_at,
+           ttft_ms,
+           duration_ms,
+           output_tokens,
+           reasoning_tokens,
+           thinking_level
+         from tps_samples
+         where provider = ? and model = ? and created_at >= ?
+         order by created_at asc
+         limit ?`,
+			)
+			.all(options.provider, options.model, sinceSeconds, limit) as Array<{
+			created_at: number;
+			ttft_ms: number;
+			duration_ms: number;
+			output_tokens: number;
+			reasoning_tokens: number;
+			thinking_level: string;
+		}>;
+
+		const events: TpsRawEvent[] = rows.map((row) => ({
+			provider: options.provider,
+			model: options.model,
+			project: "",
+			createdAt: Number(row.created_at) * 1000,
+			thinkingLevel: row.thinking_level,
+			ttftMs: Number(row.ttft_ms),
+			durationMs: Number(row.duration_ms),
+			outputTokens: Number(row.output_tokens),
+			reasoningTokens: Number(row.reasoning_tokens),
+		}));
+
+		return {
+			points: aggregateTrend(events, options.scale),
+			thinkingLevels: aggregateThinkingLevels(events),
+		};
 	}
 
 	close(): void {
@@ -300,6 +427,7 @@ function removeStaleSidecars(dbPath: string): void {
 function copyRecoverableRows(source: Database.Database, target: Database.Database): void {
 	copyTableRows(source, target, "skill_usage_events", "skill");
 	copyTableRows(source, target, "tool_usage_events", "tool");
+	copyTpsRows(source, target);
 }
 
 function copyTableRows(
@@ -344,17 +472,49 @@ function copyTableRows(
 	}
 }
 
-function configureDb(db: Database.Database): void {
+function copyTpsRows(source: Database.Database, target: Database.Database): void {
+	let columns: string[] = [];
 	try {
-		// WAL lets readers proceed while a writer commits, and shrinks the write
-		// lock to a single autocommit transaction.
-		db.pragma("journal_mode = WAL");
+		columns = (source.prepare("pragma table_info(tps_samples)").all() as Array<{ name: string }>)
+			.map((row) => row.name);
 	} catch {
-		// Read-only filesystems or network mounts may not support WAL; fall back
-		// to the default journal mode. busy_timeout below still serializes
-		// cross-process writers safely.
+		return;
 	}
-	db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+
+	const idColumn = columns.includes("id") ? "id" : undefined;
+	const required = [
+		"provider",
+		"model",
+		"thinking_level",
+		"project",
+		"created_at",
+		"ttft_ms",
+		"duration_ms",
+		"output_tokens",
+		"reasoning_tokens",
+	];
+	const originKey = columns.includes("origin_key") ? "origin_key" : undefined;
+	if (required.some((column) => !columns.includes(column))) return;
+
+	const columnsToCopy = [idColumn, ...required, originKey]
+		.filter((column): column is string => Boolean(column));
+	const placeholders = columnsToCopy.map(() => "?").join(", ");
+
+	try {
+		const select = source.prepare(`select ${columnsToCopy.join(", ")} from tps_samples`);
+		const insert = target.prepare(
+			`insert or ignore into tps_samples(${columnsToCopy.join(", ")}) values (${placeholders})`,
+		);
+		for (const row of select.iterate() as IterableIterator<Record<string, unknown>>) {
+			try {
+				insert.run(...columnsToCopy.map((column) => row[column] ?? null));
+			} catch {
+				// Skip individual unreadable or invalid rows.
+			}
+		}
+	} catch {
+		// Keep whatever rows were copied before the malformed section.
+	}
 }
 
 function initializeSchema(db: Database.Database): void {
@@ -396,6 +556,28 @@ function initializeSchema(db: Database.Database): void {
 		migrateV1Rows(db);
 	}
 
+	// Historical schema-v1 tps tables measured end-to-end duration and tps, which
+	// the new live-only flow replaces. Drop old rows so statistics start fresh.
+	const tpsColumns = db.prepare("pragma table_info(tps_samples)").all() as Array<{ name: string }>;
+	if (tpsColumns.length > 0 && !tpsColumns.some((column) => column.name === "thinking_level")) {
+		db.exec("drop table tps_samples");
+	}
+	db.exec(`
+		create table if not exists tps_samples(
+			id integer primary key,
+			provider text not null,
+			model text not null,
+			thinking_level text not null,
+			project text not null,
+			created_at integer not null,
+			ttft_ms integer not null,
+			duration_ms integer not null,
+			output_tokens integer not null,
+			reasoning_tokens integer not null,
+			origin_key text
+		);
+	`);
+
 	db.exec("create index if not exists idx_skill_usage_project on skill_usage_events(project, skill)");
 	db.exec("create index if not exists idx_skill_usage_skill on skill_usage_events(skill)");
 	db.exec("create index if not exists idx_skill_usage_created_at on skill_usage_events(created_at)");
@@ -404,6 +586,9 @@ function initializeSchema(db: Database.Database): void {
 	db.exec("create index if not exists idx_tool_usage_tool on tool_usage_events(tool)");
 	db.exec("create index if not exists idx_tool_usage_created_at on tool_usage_events(created_at)");
 	db.exec("create unique index if not exists idx_tool_usage_origin_key on tool_usage_events(origin_key) where origin_key is not null");
+	db.exec("create index if not exists idx_tps_provider_model_time on tps_samples(provider, model, created_at)");
+	db.exec("create index if not exists idx_tps_created_at on tps_samples(created_at)");
+	db.exec("create unique index if not exists idx_tps_origin_key on tps_samples(origin_key) where origin_key is not null");
 }
 
 function migrateV1Rows(db: Database.Database): void {
@@ -435,5 +620,9 @@ function legacyV1TableExists(db: Database.Database): boolean {
 	return rows.length > 0;
 }
 
-// Re-export under original name for backward compat
-export { SqlJsSkillStatsStore as SQLiteSkillStatsStore };
+// Re-export under original names for backward compat
+export {
+	SqlJsStatsStore as SQLiteStatsStore,
+	SqlJsStatsStore as SQLiteSkillStatsStore,
+	SqlJsStatsStore as SQLiteTpsStatsStore,
+};

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 
-export const DEFAULT_CONFIG_DIR = join(homedir(), ".pi", "agent", "pi-skill-stats");
+export const DEFAULT_CONFIG_DIR = join(homedir(), ".pi", "agent", "pi-stats");
 
 export interface SkillStatsConfig {
 	dataDir: string;
@@ -29,7 +29,7 @@ export function resolvePath(input: string, cwd = process.cwd()): string {
 
 /**
  * Load config. Supports a config.json with an optional `dataDir` field.
- * Falls back to ~/.pi/agent/pi-skill-stats/.
+ * Falls back to ~/.pi/agent/pi-stats/.
  */
 export function loadConfig(options: LoadConfigOptions = {}): SkillStatsConfig {
 	const env = options.env ?? process.env;
@@ -47,11 +47,11 @@ export function loadConfig(options: LoadConfigOptions = {}): SkillStatsConfig {
 				fileDataDir = parsed.dataDir;
 			}
 		} catch (error) {
-			console.warn(`pi-skill-stats: ignoring invalid config file ${configPath}`, error);
+			console.warn(`pi-stats: ignoring invalid config file ${configPath}`, error);
 		}
 	}
 
-	const selected = env.PI_SKILL_STATS_DIR?.trim() || fileDataDir || DEFAULT_CONFIG_DIR;
+	const selected = env.PI_STATS_DIR?.trim() || env.PI_SKILL_STATS_DIR?.trim() || fileDataDir || DEFAULT_CONFIG_DIR;
 	const dataDir = resolvePath(selected, cwd);
 
 	if (options.ensureDir !== false) {

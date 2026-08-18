@@ -23,8 +23,7 @@
       "./extensions/pi-search-prompts/index.ts",
       "./extensions/pi-inline-skill/index.ts",
       "./extensions/pi-wakatime/src/index.ts",
-      "./extensions/pi-cache-graph/index.ts",
-      "./extensions/pi-tps-stats/index.ts"
+      "./extensions/pi-cache-graph/index.ts"
     ],
     "skills": []
   },

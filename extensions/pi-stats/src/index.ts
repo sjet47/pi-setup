@@ -13,10 +13,11 @@ import {
 	type ScanSessionHistoryProgress,
 } from "./scanner";
 import { SkillStatsOverlay } from "./stats-overlay";
-import { SQLiteSkillStatsStore, type SkillStatsStore, type ToolUsageAggregate, type UsageAggregate } from "./store";
+import { SQLiteStatsStore, type StatsStore, type ToolUsageAggregate, type UsageAggregate } from "./store";
+import { registerTpsStatsExtension } from "./tps";
 
 export default function skillStatsExtension(pi: ExtensionAPI) {
-	let store: SkillStatsStore | undefined;
+	let store: StatsStore | undefined;
 	let statsDisabled = false;
 	let initWarningShown = false;
 	let writeWarningShown = false;
@@ -43,20 +44,20 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(message, "warning");
 	}
 
-	let storeInit: Promise<SkillStatsStore | undefined> | undefined;
-	async function ensureStore(ctx: ExtensionContext): Promise<SkillStatsStore | undefined> {
+	let storeInit: Promise<StatsStore | undefined> | undefined;
+	async function ensureStore(ctx: ExtensionContext): Promise<StatsStore | undefined> {
 		if (statsDisabled) return undefined;
 		if (store) return store;
 		if (!storeInit) {
 			storeInit = (async () => {
 				try {
 					const config = loadConfig();
-					store = await SQLiteSkillStatsStore.create(config.dataDir);
+					store = await SQLiteStatsStore.create(config.dataDir);
 					return store;
 				} catch (error) {
 					statsDisabled = true;
 					storeInit = undefined;
-					notifyOnce(ctx, "init", `pi-skill-stats disabled: ${errorMessage(error)}`);
+					notifyOnce(ctx, "init", `pi-stats disabled: ${errorMessage(error)}`);
 					return undefined;
 				}
 			})();
@@ -70,8 +71,8 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		try {
 			activeStore.insert({ skill, project: ctx.cwd, originKey });
 		} catch (error) {
-			console.warn("pi-skill-stats write failed", error);
-			notifyOnce(ctx, "write", `pi-skill-stats write failed: ${errorMessage(error)}`);
+			console.warn("pi-stats write failed", error);
+			notifyOnce(ctx, "write", `pi-stats write failed: ${errorMessage(error)}`);
 		}
 	}
 	async function recordTool(ctx: ExtensionContext, tool: string, originKey?: string) {
@@ -80,8 +81,8 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		try {
 			activeStore.insertTool({ tool, project: ctx.cwd, originKey });
 		} catch (error) {
-			console.warn("pi-skill-stats tool write failed", error);
-			notifyOnce(ctx, "write", `pi-skill-stats tool write failed: ${errorMessage(error)}`);
+			console.warn("pi-stats tool write failed", error);
+			notifyOnce(ctx, "write", `pi-stats tool write failed: ${errorMessage(error)}`);
 		}
 	}
 
@@ -150,7 +151,7 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const activeStore = await ensureStore(ctx);
 			if (!activeStore) {
-				ctx.ui.notify("pi-skill-stats is disabled; check the earlier warning for details.", "warning");
+				ctx.ui.notify("pi-stats is disabled; check the earlier warning for details.", "warning");
 				return;
 			}
 			try {
@@ -177,7 +178,7 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 				const rows = activeStore.queryTop({ project: command.scope === "all" ? undefined : ctx.cwd, limit: 1000 });
 				await showStatsOverlay(ctx, activeStore, rows, command.scope, command.query, "skill");
 			} catch (error) {
-				ctx.ui.notify(`pi-skill-stats command failed: ${errorMessage(error)}`, "error");
+				ctx.ui.notify(`pi-stats command failed: ${errorMessage(error)}`, "error");
 			}
 		},
 	});
@@ -196,7 +197,7 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const activeStore = await ensureStore(ctx);
 			if (!activeStore) {
-				ctx.ui.notify("pi-skill-stats is disabled; check the earlier warning for details.", "warning");
+				ctx.ui.notify("pi-stats is disabled; check the earlier warning for details.", "warning");
 				return;
 			}
 			try {
@@ -221,10 +222,12 @@ export default function skillStatsExtension(pi: ExtensionAPI) {
 				const rows = activeStore.queryTopTools({ project: command.scope === "all" ? undefined : ctx.cwd, limit: 1000 });
 				await showStatsOverlay(ctx, activeStore, rows, command.scope, command.query, "tool");
 			} catch (error) {
-				ctx.ui.notify(`pi-skill-stats command failed: ${errorMessage(error)}`, "error");
+				ctx.ui.notify(`pi-stats command failed: ${errorMessage(error)}`, "error");
 			}
 		},
 	});
+
+	registerTpsStatsExtension(pi, { ensureStore });
 }
 
 type ParsedStatsCommand =
@@ -265,7 +268,7 @@ function liveOrigin(ctx: ExtensionContext, role: "user" | "assistant"): { fileKe
 
 async function showStatsOverlay(
 	ctx: ExtensionContext,
-	store: SkillStatsStore,
+	store: StatsStore,
 	rows: UsageAggregate[] | ToolUsageAggregate[],
 	scope: "project" | "all",
 	query: string,
@@ -307,7 +310,7 @@ async function showStatsOverlay(
 }
 
 function createScanProgressReporter(ctx: ExtensionContext, kind: "skill" | "tool") {
-	const widgetKey = `pi-skill-stats-${kind}-scan`;
+	const widgetKey = `pi-stats-${kind}-scan`;
 	let lastRender = 0;
 
 	const update = (progress: ScanSessionHistoryProgress) => {

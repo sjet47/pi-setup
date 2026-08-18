@@ -2,7 +2,7 @@
   "name": "pi-skill-stats",
   "version": "0.1.0",
   "type": "module",
-  "description": "Pi extension for recording and reporting skill usage statistics.",
+  "description": "Pi extension for recording skill/tool usage and live TPS statistics.",
   "scripts": {
     "test": "TZ=UTC vitest run",
     "typecheck": "tsc --noEmit"
@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.75.3",
+    "@earendil-works/pi-tui": "^0.80.7",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.10",
     "typescript": "^5.8.2",

@@ -1,13 +1,9 @@
 import { fuzzyFilter, Input, Key, matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable } from "@earendil-works/pi-tui";
+import { border as borderText, cell as cellText, clamp, formatTimestamp, line as lineText, pad2, type StatsOverlayTheme } from "../overlay-common";
 import type { ModelTpsSummary, ThinkingLevelSummary, TpsScale, TpsTrendResult } from "./types";
 
 const VISIBLE_ROWS = 14;
 const SCALES: TpsScale[] = ["hour", "day", "week"];
-
-interface OverlayTheme {
-  fg(color: "accent" | "border" | "borderMuted" | "dim" | "muted" | "success" | "warning", text: string): string;
-  bold(text: string): string;
-}
 
 type OverlayMode = "list" | "detail";
 
@@ -25,7 +21,7 @@ export class TpsStatsOverlay implements Component, Focusable {
 
   constructor(
     private readonly rows: ModelTpsSummary[],
-    private readonly theme: OverlayTheme,
+    private readonly theme: StatsOverlayTheme,
     private readonly onClose: () => void,
     private readonly getTrend: (provider: string, model: string, scale: TpsScale) => TpsTrendResult,
   ) {
@@ -352,21 +348,15 @@ export class TpsStatsOverlay implements Component, Focusable {
   }
 
   private cell(value: string, width: number, align: "left" | "right" = "left"): string {
-    const truncated = truncateToWidth(value, width, "…");
-    const padding = " ".repeat(Math.max(0, width - visibleWidth(truncated)));
-    return align === "right" ? padding + truncated : truncated + padding;
+    return cellText(value, width, align);
   }
 
   private line(content: string, contentWidth: number): string {
-    const truncated = truncateToWidth(content, contentWidth, "…");
-    const padding = " ".repeat(Math.max(0, contentWidth - visibleWidth(truncated)));
-    return this.theme.fg("border", "│") + " " + truncated + padding + " " + this.theme.fg("border", "│");
+    return lineText(this.theme, content, contentWidth);
   }
 
   private border(position: "top" | "bottom", width: number): string {
-    const left = position === "top" ? "╭" : "╰";
-    const right = position === "top" ? "╮" : "╯";
-    return this.theme.fg("border", left + "─".repeat(Math.max(0, width - 2)) + right);
+    return borderText(this.theme, position, width);
   }
 }
 
@@ -402,23 +392,7 @@ function formatBucket(timestamp: number, scale: TpsScale): string {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
 }
 
-function formatTimestamp(timestamp: number, variant: "short" | "long" = "long"): string {
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
-  const date = new Date(timestamp * 1000);
-  const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
-  if (variant === "short") return day;
-  return `${day} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
-}
-
 function truncate(value: string, width: number): string {
   if (value.length <= width) return value;
   return width <= 1 ? value.slice(0, width) : `${value.slice(0, Math.max(0, width - 1))}…`;
-}
-
-function pad2(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
 }

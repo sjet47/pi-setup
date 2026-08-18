@@ -1,28 +1,15 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import type { TpsScale } from "./src/types";
-import { SQLiteTpsStatsStore, type TpsStatsStore } from "./src/store";
-import { TpsStatsOverlay } from "./src/overlay";
+import type { StatsStore } from "../store";
+import type { TpsScale } from "./types";
+import { TpsStatsOverlay } from "./overlay";
 
-interface TpsConfig {
-  dataDir: string;
+interface TpsStatsExtensionDeps {
+  ensureStore(ctx: ExtensionContext): Promise<StatsStore | undefined>;
 }
 
-const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-tps-stats.json");
-
-const DEFAULT_CONFIG: TpsConfig = {
-  dataDir: join(homedir(), ".pi", "agent", "pi-tps-stats"),
-};
-
-export default function (pi: ExtensionAPI) {
-  let store: TpsStatsStore | undefined;
-  let storeDisabled = false;
-  let storeInitWarningShown = false;
-
+export function registerTpsStatsExtension(pi: ExtensionAPI, deps: TpsStatsExtensionDeps) {
   interface TrackedMessage {
     provider: string;
     model: string;
@@ -35,27 +22,6 @@ export default function (pi: ExtensionAPI) {
 
   let requestSentAt = 0;
   let tracked: TrackedMessage | null = null;
-
-  async function ensureStore(ctx: ExtensionContext): Promise<TpsStatsStore | undefined> {
-    if (storeDisabled) return undefined;
-    if (store) return store;
-    try {
-      const config = loadConfig();
-      store = SQLiteTpsStatsStore.create(config.dataDir);
-      return store;
-    } catch (error) {
-      storeDisabled = true;
-      if (!storeInitWarningShown) {
-        storeInitWarningShown = true;
-        ctx.ui.notify(`pi-tps-stats disabled: ${errorMessage(error)}`, "warning");
-      }
-      return undefined;
-    }
-  }
-
-  pi.on("session_start", async (_event, ctx) => {
-    await ensureStore(ctx);
-  });
 
   pi.on("before_provider_request", () => {
     requestSentAt = Date.now();
@@ -91,11 +57,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("message_end", async (event, ctx) => {
-    const activeStore = await ensureStore(ctx);
-    if (!activeStore) return;
     const message = event.message;
     if (message.role !== "assistant") return;
     if (!tracked) return;
+
+    const activeStore = await deps.ensureStore(ctx);
+    if (!activeStore) return;
 
     const outputTokens = numberValue(message.usage?.output);
     if (outputTokens <= 0) {
@@ -133,26 +100,24 @@ export default function (pi: ExtensionAPI) {
     requestSentAt = 0;
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
+  pi.on("session_shutdown", async (_event, _ctx) => {
     tracked = null;
     requestSentAt = 0;
-    store?.close();
-    store = undefined;
   });
 
   pi.registerCommand("tps-stats", {
     description: "Show live provider/model TPS trends (TTFT, throughput, thinking tokens)",
     handler: async (_args, ctx) => {
-      const activeStore = await ensureStore(ctx);
+      const activeStore = await deps.ensureStore(ctx);
       if (!activeStore) {
-        ctx.ui.notify("pi-tps-stats is disabled; check the earlier warning for details.", "warning");
+        ctx.ui.notify("pi-stats is disabled; check the earlier warning for details.", "warning");
         return;
       }
       await showStatsOverlay(ctx, activeStore);
     },
   });
 
-  async function showStatsOverlay(ctx: ExtensionContext, activeStore: TpsStatsStore) {
+  async function showStatsOverlay(ctx: ExtensionContext, activeStore: StatsStore) {
     const rows = activeStore.listModels();
     const getTrend = (provider: string, model: string, scale: TpsScale) =>
       activeStore.queryTrend({ provider, model, scale });
@@ -215,18 +180,6 @@ function themeToOverlayTheme(theme: Theme) {
   };
 }
 
-function loadConfig(): TpsConfig {
-  try {
-    const raw = readFileSync(CONFIG_PATH, "utf8");
-    const parsed = JSON.parse(raw) as Partial<TpsConfig>;
-    return {
-      dataDir: typeof parsed.dataDir === "string" && parsed.dataDir.length > 0 ? parsed.dataDir : DEFAULT_CONFIG.dataDir,
-    };
-  } catch {
-    return { ...DEFAULT_CONFIG };
-  }
-}
-
 function messageFingerprint(content: unknown): string {
   if (typeof content === "string") return sha1(content);
   if (!Array.isArray(content)) return "";
@@ -250,8 +203,4 @@ function stringValue(value: unknown): string {
 
 function numberValue(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

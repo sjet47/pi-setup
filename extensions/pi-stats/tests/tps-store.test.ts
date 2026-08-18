@@ -2,16 +2,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SQLiteTpsStatsStore } from "../src/store";
-import { aggregateThinkingLevels, aggregateTrend } from "../src/aggregate";
-import type { TpsRawEvent } from "../src/types";
+import { SQLiteStatsStore } from "../src/store";
+import { aggregateThinkingLevels, aggregateTrend } from "../src/tps/aggregate";
+import type { TpsRawEvent } from "../src/tps/types";
 
 let tempDir: string;
-let store: SQLiteTpsStatsStore;
+let store: SQLiteStatsStore;
 
 beforeEach(() => {
-  tempDir = mkdtempSync(join(tmpdir(), "pi-tps-stats-test-"));
-  store = SQLiteTpsStatsStore.create(tempDir);
+  tempDir = mkdtempSync(join(tmpdir(), "pi-stats-tps-test-"));
+  store = SQLiteStatsStore.create(tempDir);
 });
 
 afterEach(() => {
@@ -19,7 +19,7 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-function sample(overrides: Partial<Parameters<SQLiteTpsStatsStore["insertSample"]>[0]> = {}) {
+function sample(overrides: Partial<Parameters<SQLiteStatsStore["insertSample"]>[0]> = {}) {
   return {
     provider: "provider-a",
     model: "model-1",
@@ -36,6 +36,20 @@ function sample(overrides: Partial<Parameters<SQLiteTpsStatsStore["insertSample"
 }
 
 describe("store", () => {
+  it("stores skill, tool, and tps data in one database", () => {
+    expect(store.insert({ skill: "tdd", project: "/project", createdAt: 1_700_000_000, originKey: "skill:1" })).toBe(true);
+    expect(store.insertTool({ tool: "read", project: "/project", createdAt: 1_700_000_000, originKey: "tool:1" })).toBe(true);
+    expect(store.insertSample(sample())).toBe(true);
+
+    expect(store.queryTop({ project: "/project" })).toEqual([
+      { skill: "tdd", total: 1, lastUsed: 1_700_000_000 },
+    ]);
+    expect(store.queryTopTools({ project: "/project" })).toEqual([
+      { tool: "read", total: 1, lastUsed: 1_700_000_000 },
+    ]);
+    expect(store.listModels()).toHaveLength(1);
+  });
+
   it("stores raw metrics and deduplicates by origin key", () => {
     expect(store.insertSample(sample())).toBe(true);
     expect(store.insertSample(sample())).toBe(false);
