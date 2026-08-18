@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import Database from "better-sqlite3";
 import { formatTimestamp, SkillStatsOverlay } from "../src/stats-overlay";
-import { SQLiteSkillStatsStore, type ToolUsageEvent, type UsageEvent } from "../src/store";
+import { SQLiteStatsStore, type ToolUsageEvent, type UsageEvent } from "../src/store";
 
 // The trend buckets and timestamp rendering use the local timezone; the test
 // expectations below assume UTC (the package.json test script pins TZ=UTC, and
@@ -107,7 +107,7 @@ import { tmpdir } from "node:os";
 
 async function createStore() {
 	const dir = mkdtempSync(join(tmpdir(), "pi-stats-test-"));
-	const store = await SQLiteSkillStatsStore.create(dir);
+	const store = await SQLiteStatsStore.create(dir);
 	return { store, dir };
 }
 
@@ -121,7 +121,7 @@ const testTheme = {
 	bold: (text: string) => text,
 };
 
-describe("SQLiteSkillStatsStore", () => {
+describe("SQLiteStatsStore", () => {
 	test("inserts and aggregates by current project", async () => {
 		const { store } = await createStore();
 		store.insert({ skill: "tdd", project: "/a", createdAt: 10 });
@@ -181,18 +181,11 @@ describe("SQLiteSkillStatsStore", () => {
 		]);
 	});
 
-	test("migrates legacy source column", async () => {
-		const { store } = await createStore();
-		// Real store always initializes the modern schema; no mock to inspect
-		store.insert({ skill: "tdd", project: "/a", createdAt: 10 });
-		expect(store.queryTop({ project: "/a" }).length).toBe(1);
-	});
-
 	test("recovers an unreadable database file at startup", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-stats-test-"));
 		writeFileSync(join(dir, "stats.sqlite"), "not a sqlite database");
 
-		const store = SQLiteSkillStatsStore.create(dir);
+		const store = SQLiteStatsStore.create(dir);
 		expect(store.queryTop({})).toEqual([]);
 		expect(store.queryTopTools({})).toEqual([]);
 		expect(readdirSync(dir).some((file) => file.startsWith("stats.sqlite.corrupt-"))).toBe(true);
@@ -201,7 +194,7 @@ describe("SQLiteSkillStatsStore", () => {
 
 	test("recovers a malformed database that still opens", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-stats-test-"));
-		const store = SQLiteSkillStatsStore.create(dir);
+		const store = SQLiteStatsStore.create(dir);
 		for (let i = 0; i < 500; i += 1) {
 			store.insertTool({ tool: "read", project: "/a", createdAt: 1000 + i });
 		}
@@ -217,7 +210,7 @@ describe("SQLiteSkillStatsStore", () => {
 		bytes[4096 * 2 + 13] = 0xff;
 		writeFileSync(dbPath, bytes);
 
-		const recovered = SQLiteSkillStatsStore.create(dir);
+		const recovered = SQLiteStatsStore.create(dir);
 		expect(() => recovered.queryTopTools({})).not.toThrow();
 		expect(recovered.insertTool({ tool: "bash", project: "/a", createdAt: 20 })).toBe(true);
 		expect(readdirSync(dir).some((file) => file.startsWith("stats.sqlite.corrupt-"))).toBe(true);

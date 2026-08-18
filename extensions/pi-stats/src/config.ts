@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 
 export const DEFAULT_CONFIG_DIR = join(homedir(), ".pi", "agent", "pi-stats");
 
-export interface SkillStatsConfig {
+export interface StatsConfig {
 	dataDir: string;
 	configPath: string;
 }
@@ -31,7 +31,7 @@ export function resolvePath(input: string, cwd = process.cwd()): string {
  * Load config. Supports a config.json with an optional `dataDir` field.
  * Falls back to ~/.pi/agent/pi-stats/.
  */
-export function loadConfig(options: LoadConfigOptions = {}): SkillStatsConfig {
+export function loadConfig(options: LoadConfigOptions = {}): StatsConfig {
 	const env = options.env ?? process.env;
 	const cwd = options.cwd ?? process.cwd();
 	const configPath = resolvePath(
@@ -51,7 +51,7 @@ export function loadConfig(options: LoadConfigOptions = {}): SkillStatsConfig {
 		}
 	}
 
-	const selected = env.PI_STATS_DIR?.trim() || env.PI_SKILL_STATS_DIR?.trim() || fileDataDir || DEFAULT_CONFIG_DIR;
+	const selected = env.PI_STATS_DIR?.trim() || fileDataDir || DEFAULT_CONFIG_DIR;
 	const dataDir = resolvePath(selected, cwd);
 
 	if (options.ensureDir !== false) {

@@ -39,18 +39,6 @@ describe("loadConfig", () => {
 		expect(config.dataDir).toBe(join(dir, "env"));
 	});
 
-	test("keeps PI_SKILL_STATS_DIR as a compatibility alias", () => {
-		const configPath = join(dir, "config.json");
-		writeFileSync(configPath, JSON.stringify({ dataDir: "./config" }));
-		const config = loadConfig({
-			env: { PI_SKILL_STATS_DIR: "./legacy" },
-			configPath,
-			cwd: dir,
-			ensureDir: false,
-		});
-		expect(config.dataDir).toBe(join(dir, "legacy"));
-	});
-
 	test("expands home paths", () => {
 		expect(expandHome("~/stats.sqlite")).toBe(join(homedir(), "stats.sqlite"));
 	});

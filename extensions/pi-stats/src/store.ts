@@ -537,31 +537,6 @@ function initializeSchema(db: Database.Database): void {
 		);
 	`);
 
-	// Migration: old source column with origin key normalization
-	const columns = db.prepare("pragma table_info(skill_usage_events)").all() as Array<{ name: string }>;
-	const colNames = columns.map((row) => row.name);
-	if (colNames.includes("source")) {
-		db.exec(`
-			alter table skill_usage_events rename to skill_usage_events_v1;
-			create table skill_usage_events(
-				id integer primary key,
-				skill text not null,
-				project text not null,
-				created_at integer not null,
-				origin_key text
-			);
-		`);
-		migrateV1Rows(db);
-	} else if (legacyV1TableExists(db)) {
-		migrateV1Rows(db);
-	}
-
-	// Historical schema-v1 tps tables measured end-to-end duration and tps, which
-	// the new live-only flow replaces. Drop old rows so statistics start fresh.
-	const tpsColumns = db.prepare("pragma table_info(tps_samples)").all() as Array<{ name: string }>;
-	if (tpsColumns.length > 0 && !tpsColumns.some((column) => column.name === "thinking_level")) {
-		db.exec("drop table tps_samples");
-	}
 	db.exec(`
 		create table if not exists tps_samples(
 			id integer primary key,
@@ -591,38 +566,5 @@ function initializeSchema(db: Database.Database): void {
 	db.exec("create unique index if not exists idx_tps_origin_key on tps_samples(origin_key) where origin_key is not null");
 }
 
-function migrateV1Rows(db: Database.Database): void {
-	// Normalize origin keys: migrate :manual:/:agent:/:unknown: segments to the
-	// modern format and deduplicate by normalized origin key.
-	db.exec(`
-		insert or ignore into skill_usage_events(id, skill, project, created_at, origin_key)
-		select
-		  min(id),
-		  min(skill),
-		  min(project),
-		  max(created_at),
-		  case
-		    when origin_key like 'scan:%:manual:%' then replace(origin_key, ':manual:', ':')
-		    when origin_key like 'scan:%:agent:%'  then replace(origin_key, ':agent:', ':')
-		    when origin_key like 'scan:%:unknown:%' then replace(origin_key, ':unknown:', ':')
-		    else origin_key
-		  end as normalized_origin_key
-		from skill_usage_events_v1
-		group by case when normalized_origin_key is null then 'row:' || id else normalized_origin_key end;
-	`);
-	db.exec("drop table skill_usage_events_v1");
-}
-
-function legacyV1TableExists(db: Database.Database): boolean {
-	const rows = db
-		.prepare("select name from sqlite_master where type = 'table' and name = 'skill_usage_events_v1'")
-		.all();
-	return rows.length > 0;
-}
-
-// Re-export under original names for backward compat
-export {
-	SqlJsStatsStore as SQLiteStatsStore,
-	SqlJsStatsStore as SQLiteSkillStatsStore,
-	SqlJsStatsStore as SQLiteTpsStatsStore,
-};
+	// Re-export under the canonical name
+	export { SqlJsStatsStore as SQLiteStatsStore };
