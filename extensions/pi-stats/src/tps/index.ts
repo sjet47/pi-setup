@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { Key, matchesKey, type OverlayHandle } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { StatsStore } from "../store";
 import type { TpsScale } from "./types";
@@ -119,27 +119,49 @@ export function registerTpsStatsExtension(pi: ExtensionAPI, deps: TpsStatsExtens
 
   async function showStatsOverlay(ctx: ExtensionContext, activeStore: StatsStore) {
     const rows = activeStore.listModels();
+    let overlayHandle: OverlayHandle | undefined;
     const getTrend = (provider: string, model: string, scale: TpsScale) =>
       activeStore.queryTrend({ provider, model, scale });
 
     await ctx.ui.custom<null>(
       (tui, theme, _keybindings, done) => {
         let closed = false;
+        let waitingForTopOverlay = false;
         let unsubscribeInput: (() => void) | undefined;
-        const close = () => {
+
+        const finishClose = () => {
           if (closed) return;
           closed = true;
           unsubscribeInput?.();
           done(null);
         };
+        const close = () => finishClose();
+        const closeFromUnderneath = () => {
+          if (closed || waitingForTopOverlay || !overlayHandle) return;
+          overlayHandle.hide();
+          waitingForTopOverlay = true;
+        };
+
+        const overlay = new TpsStatsOverlay(rows, themeToOverlayTheme(theme), close, getTrend);
         unsubscribeInput = tui.addInputListener((data) => {
-          if (matchesKey(data, Key.escape)) {
-            close();
+          if (waitingForTopOverlay) {
+            // The top overlay handles the key first; once it is removed from
+            // the stack, done() can safely finish this hidden custom UI.
+            queueMicrotask(() => {
+              if (!waitingForTopOverlay) return;
+              if (!(tui as unknown as { hasOverlayEntries: boolean }).hasOverlayEntries) finishClose();
+            });
+            return undefined;
+          }
+          if (!matchesKey(data, Key.escape)) return undefined;
+          if (!overlay.focused) {
+            closeFromUnderneath();
             return { consume: true };
           }
-          return undefined;
+          if (!overlay.shouldCloseOnEscape()) return undefined;
+          close();
+          return { consume: true };
         });
-        const overlay = new TpsStatsOverlay(rows, themeToOverlayTheme(theme), close, getTrend);
         return {
           get focused() {
             return overlay.focused;
@@ -166,6 +188,9 @@ export function registerTpsStatsExtension(pi: ExtensionAPI, deps: TpsStatsExtens
           maxHeight: "80%",
           anchor: "center",
           margin: 1,
+        },
+        onHandle: (handle) => {
+          overlayHandle = handle;
         },
       },
     );

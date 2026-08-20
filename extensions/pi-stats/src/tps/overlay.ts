@@ -38,6 +38,10 @@ export class TpsStatsOverlay implements Component, Focusable {
     this.searchInput.focused = value && this.mode === "list";
   }
 
+  shouldCloseOnEscape(): boolean {
+    return this.mode === "list";
+  }
+
   handleInput(data: string): void {
     if (matchesKey(data, Key.ctrl("c"))) {
       this.onClose();
