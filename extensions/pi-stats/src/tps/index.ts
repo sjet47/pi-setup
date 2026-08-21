@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Key, matchesKey, type OverlayHandle } from "@earendil-works/pi-tui";
+import { isKeyRelease, isKeyRepeat, Key, matchesKey, type OverlayHandle } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { StatsStore } from "../store";
 import type { TpsScale } from "./types";
@@ -144,6 +144,7 @@ export function registerTpsStatsExtension(pi: ExtensionAPI, deps: TpsStatsExtens
 
         const overlay = new TpsStatsOverlay(rows, themeToOverlayTheme(theme), close, getTrend);
         unsubscribeInput = tui.addInputListener((data) => {
+          if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
           if (waitingForTopOverlay) {
             // The top overlay handles the key first; once it is removed from
             // the stack, done() can safely finish this hidden custom UI.
