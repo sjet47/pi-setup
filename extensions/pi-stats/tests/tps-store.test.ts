@@ -85,6 +85,27 @@ describe("store", () => {
     expect(hourly.points[0].avgThinkingTokens).toBeCloseTo(60);
   });
 
+  it("keeps the newest samples when the event limit is exceeded", () => {
+    const base = new Date(2026, 0, 1, 0, 0, 0).getTime();
+    for (let hour = 0; hour < 5; hour += 1) {
+      store.insertSample(sample({
+        createdAt: Math.floor((base + hour * 3_600_000) / 1000),
+        ttftMs: 100,
+        durationMs: 10_000,
+        outputTokens: 100,
+        reasoningTokens: 0,
+        originKey: `limit-k${hour}`,
+      }));
+    }
+    // The two earliest hours must be dropped by the limit, not the latest.
+    const trend = store.queryTrend({ provider: "provider-a", model: "model-1", scale: "hour", since: 0, limit: 3 });
+    expect(trend.points.map((point) => point.bucketStart)).toEqual([
+      base + 2 * 3_600_000,
+      base + 3 * 3_600_000,
+      base + 4 * 3_600_000,
+    ]);
+  });
+
   it("groups thinking tokens by thinking level", () => {
     store.insertSample(sample({ createdAt: 1_700_000_000, thinkingLevel: "high", reasoningTokens: 100, originKey: "k1" }));
     store.insertSample(sample({ createdAt: 1_700_000_100, thinkingLevel: "high", reasoningTokens: 200, originKey: "k2" }));

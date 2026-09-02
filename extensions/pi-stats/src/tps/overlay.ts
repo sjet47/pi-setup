@@ -54,12 +54,22 @@ export class TpsStatsOverlay implements Component, Focusable {
         this.invalidate();
         return;
       }
-      if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
+      if (matchesKey(data, Key.tab)) {
         this.cycleScale(1);
         return;
       }
-      if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
+      if (matchesKey(data, Key.shift("tab"))) {
         this.cycleScale(-1);
+        return;
+      }
+      // ←/→ page the trend: newer buckets sit at the top, so left pages
+      // toward older samples and right snaps back toward the newest page.
+      if (matchesKey(data, Key.left)) {
+        this.moveTrendWindow(VISIBLE_ROWS);
+        return;
+      }
+      if (matchesKey(data, Key.right)) {
+        this.moveTrendWindow(-VISIBLE_ROWS);
         return;
       }
       if (matchesKey(data, Key.up)) {
@@ -155,8 +165,11 @@ export class TpsStatsOverlay implements Component, Focusable {
       return this.renderList(safeWidth, contentWidth);
     }
     const trend = this.trendFor(row.provider, row.model);
-    this.trendWindowStart = clamp(this.trendWindowStart, 0, Math.max(0, trend.points.length - VISIBLE_ROWS));
-    const visible = trend.points.slice(this.trendWindowStart, this.trendWindowStart + VISIBLE_ROWS);
+    // Newest bucket first: windowStart 0 shows the latest page and grows
+    // toward the past.
+    const descending = [...trend.points].reverse();
+    this.trendWindowStart = clamp(this.trendWindowStart, 0, Math.max(0, descending.length - VISIBLE_ROWS));
+    const visible = descending.slice(this.trendWindowStart, this.trendWindowStart + VISIBLE_ROWS);
     const maxTps = Math.max(1, ...trend.points.map((point) => point.avgTps));
     const bucketWidth = 17;
     const samplesWidth = 5;
@@ -200,7 +213,7 @@ export class TpsStatsOverlay implements Component, Focusable {
       this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
       ...this.renderThinkingLevels(trend.thinkingLevels, contentWidth),
       this.line(
-        this.theme.fg("dim", `Tab/←/→ scale · ↑/↓ scroll · Enter/Esc back · Ctrl-C close`),
+        this.theme.fg("dim", `Tab/⇧Tab scale · ←/→ page · ↑/↓ scroll · Enter/Esc back · Ctrl-C close`),
         contentWidth,
       ),
       this.border("bottom", safeWidth),

@@ -20,6 +20,12 @@ function createOverlay(onClose: () => void) {
 	return new TpsStatsOverlay(rows, testTheme, onClose, () => ({ points: [], thinkingLevels: [] }));
 }
 
+function bucketLabel(ms: number): string {
+	const date = new Date(ms);
+	const pad = (value: number) => String(value).padStart(2, "0");
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:00`;
+}
+
 describe("TpsStatsOverlay", () => {
 	it("only allows Escape to close from the list", () => {
 		const overlay = createOverlay(() => {});
@@ -56,5 +62,32 @@ describe("TpsStatsOverlay", () => {
 
 		overlay.handleInput("\u001b");
 		expect(closeCount).toBe(1);
+	});
+
+	it("renders the trend newest-first in detail", () => {
+		const base = new Date(2026, 0, 1, 0, 0, 0).getTime();
+		const points = [0, 1, 2, 3].map((hour) => ({
+			bucketStart: base + hour * 3_600_000,
+			samples: 1,
+			avgTtftMs: 0,
+			avgTps: 10,
+			avgThinkingTokens: 0,
+		}));
+		const rows: ModelTpsSummary[] = [{
+			provider: "provider-a",
+			model: "model-1",
+			samples: 1,
+			lastSeen: 1_700_000_000,
+			avgTtftMs: 0,
+			avgTps: 10,
+			avgThinkingTokens: 0,
+		}];
+		const overlay = new TpsStatsOverlay(rows, testTheme, () => {}, () => ({ points, thinkingLevels: [] }));
+		overlay.handleInput("\r");
+		const text = overlay.render(140).join("\n");
+		const newest = bucketLabel(base + 3 * 3_600_000);
+		const oldest = bucketLabel(base);
+		expect(text).toContain(newest);
+		expect(text.indexOf(newest)).toBeLessThan(text.indexOf(oldest));
 	});
 });

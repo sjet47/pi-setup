@@ -318,7 +318,7 @@ export class SqlJsStatsStore implements StatsStore {
            thinking_level
          from tps_samples
          where provider = ? and model = ? and created_at >= ?
-         order by created_at asc
+         order by created_at desc
          limit ?`,
 			)
 			.all(options.provider, options.model, sinceSeconds, limit) as Array<{
@@ -329,6 +329,7 @@ export class SqlJsStatsStore implements StatsStore {
 			reasoning_tokens: number;
 			thinking_level: string;
 		}>;
+		rows.reverse(); // newest-first SQL order -> ascending for the aggregator
 
 		const events: TpsRawEvent[] = rows.map((row) => ({
 			provider: options.provider,
