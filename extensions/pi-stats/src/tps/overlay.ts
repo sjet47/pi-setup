@@ -1,9 +1,16 @@
 import { fuzzyFilter, Input, Key, matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable } from "@earendil-works/pi-tui";
 import { border as borderText, cell as cellText, clamp, formatTimestamp, line as lineText, pad2, type StatsOverlayTheme } from "../overlay-common";
-import type { ModelTpsSummary, ThinkingLevelSummary, TpsScale, TpsTrendResult } from "./types";
+import type { ModelTpsSummary, ThinkingLevelSummary, TpsScale, TpsTrendPoint, TpsTrendResult } from "./types";
 
 const VISIBLE_ROWS = 14;
 const SCALES: TpsScale[] = ["hour", "day", "week"];
+const DEFAULT_TREND_METRIC = 2; // tps
+const TREND_METRICS: { key: "n" | "ttft" | "tps" | "think"; value: (point: TpsTrendPoint) => number }[] = [
+  { key: "n", value: (point) => point.samples },
+  { key: "ttft", value: (point) => point.avgTtftMs },
+  { key: "tps", value: (point) => point.avgTps },
+  { key: "think", value: (point) => point.avgThinkingTokens },
+];
 
 type OverlayMode = "list" | "detail";
 
@@ -18,6 +25,7 @@ export class TpsStatsOverlay implements Component, Focusable {
   private trendWindowStart = 0;
   private mode: OverlayMode = "list";
   private scale: TpsScale = "hour";
+  private metricIndex = DEFAULT_TREND_METRIC;
 
   constructor(
     private readonly rows: ModelTpsSummary[],
@@ -60,6 +68,11 @@ export class TpsStatsOverlay implements Component, Focusable {
       }
       if (matchesKey(data, Key.shift("tab"))) {
         this.cycleScale(-1);
+        return;
+      }
+      // Digit keys pick which column the trend bar follows.
+      if (data.length === 1 && data >= "0" && data <= String(TREND_METRICS.length - 1)) {
+        this.setTrendMetric(Number(data));
         return;
       }
       // ←/→ page the trend: newer buckets sit at the top, so left pages
@@ -170,7 +183,8 @@ export class TpsStatsOverlay implements Component, Focusable {
     const descending = [...trend.points].reverse();
     this.trendWindowStart = clamp(this.trendWindowStart, 0, Math.max(0, descending.length - VISIBLE_ROWS));
     const visible = descending.slice(this.trendWindowStart, this.trendWindowStart + VISIBLE_ROWS);
-    const maxTps = Math.max(1, ...trend.points.map((point) => point.avgTps));
+    const metric = TREND_METRICS[this.metricIndex];
+    const maxValue = Math.max(1, ...trend.points.map((point) => metric.value(point)));
     const bucketWidth = 17;
     const samplesWidth = 5;
     const ttftWidth = 9;
@@ -186,14 +200,14 @@ export class TpsStatsOverlay implements Component, Focusable {
       ),
       this.renderScaleTabs(contentWidth),
       this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
-      this.renderTrendHeader(contentWidth, bucketWidth, samplesWidth, ttftWidth, tpsWidth, thinkWidth, barWidth),
+      this.renderTrendHeader(contentWidth, bucketWidth, samplesWidth, ttftWidth, tpsWidth, thinkWidth),
     ];
 
     if (trend.points.length === 0) {
       lines.push(this.line(this.theme.fg("muted", "No samples in the selected time range."), contentWidth));
     } else {
       for (const point of visible) {
-        const filled = Math.max(1, Math.round((point.avgTps / maxTps) * barWidth));
+        const filled = Math.max(1, Math.round((metric.value(point) / maxValue) * barWidth));
         const bar = this.theme.fg("success", "█".repeat(filled)) + this.theme.fg("borderMuted", "░".repeat(Math.max(0, barWidth - filled)));
         lines.push(
           this.line(
@@ -213,7 +227,7 @@ export class TpsStatsOverlay implements Component, Focusable {
       this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
       ...this.renderThinkingLevels(trend.thinkingLevels, contentWidth),
       this.line(
-        this.theme.fg("dim", `Tab/⇧Tab scale · ←/→ page · ↑/↓ scroll · Enter/Esc back · Ctrl-C close`),
+        this.theme.fg("dim", `0-3 trend column · Tab/⇧Tab scale · ←/→ page · ↑/↓ scroll · Enter/Esc back`),
         contentWidth,
       ),
       this.border("bottom", safeWidth),
@@ -247,15 +261,25 @@ export class TpsStatsOverlay implements Component, Focusable {
     ttftWidth: number,
     tpsWidth: number,
     thinkWidth: number,
-    barWidth: number,
   ): string {
-    const header = this.cell("bucket", bucketWidth) +
-      " " + this.cell("n", samplesWidth, "right") +
-      " " + this.cell("ttft", ttftWidth, "right") +
-      " " + this.cell("tps", tpsWidth, "right") +
-      " " + this.cell("think", thinkWidth, "right") +
-      " " + this.theme.fg("muted", "trend");
-    return this.line(this.theme.fg("accent", this.theme.bold(header)), contentWidth);
+    const active = TREND_METRICS[this.metricIndex];
+    const header =
+      this.cell(this.theme.fg("muted", "bucket"), bucketWidth) + " " +
+      this.renderMetricCell(0, samplesWidth, "right") + " " +
+      this.renderMetricCell(1, ttftWidth, "right") + " " +
+      this.renderMetricCell(2, tpsWidth, "right") + " " +
+      this.renderMetricCell(3, thinkWidth, "right") + " " +
+      this.theme.fg("accent", this.theme.bold(`· ${active.key}`)) + this.theme.fg("muted", " ▸");
+    return this.line(header, contentWidth);
+  }
+
+  private renderMetricCell(index: number, width: number, align: "left" | "right"): string {
+    const meta = TREND_METRICS[index];
+    const label = `${meta.key}[${index}]`;
+    const styled = index === this.metricIndex
+      ? this.theme.fg("accent", this.theme.bold(label))
+      : this.theme.fg("muted", label);
+    return this.cell(styled, width, align);
   }
 
   private renderScaleTabs(contentWidth: number): string {
@@ -313,6 +337,13 @@ export class TpsStatsOverlay implements Component, Focusable {
   private cycleScale(delta: number): void {
     const current = SCALES.indexOf(this.scale);
     this.scale = SCALES[clamp(current + delta, 0, SCALES.length - 1)];
+    this.trendWindowStart = 0;
+    this.invalidate();
+  }
+
+  private setTrendMetric(index: number): void {
+    if (!TREND_METRICS[index] || index === this.metricIndex) return;
+    this.metricIndex = index;
     this.trendWindowStart = 0;
     this.invalidate();
   }

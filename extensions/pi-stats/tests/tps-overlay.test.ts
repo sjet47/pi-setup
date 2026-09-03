@@ -90,4 +90,41 @@ describe("TpsStatsOverlay", () => {
 		expect(text).toContain(newest);
 		expect(text.indexOf(newest)).toBeLessThan(text.indexOf(oldest));
 	});
+
+	it("labels trend columns and switches the trend metric with digit keys", () => {
+		const base = new Date(2026, 0, 1, 0, 0, 0).getTime();
+		const points = [0, 1, 2, 3].map((hour) => ({
+			bucketStart: base + hour * 3_600_000,
+			samples: 1,
+			avgTtftMs: 0,
+			avgTps: 10,
+			avgThinkingTokens: 0,
+		}));
+		const rows: ModelTpsSummary[] = [{
+			provider: "provider-a",
+			model: "model-1",
+			samples: 1,
+			lastSeen: 1_700_000_000,
+			avgTtftMs: 0,
+			avgTps: 10,
+			avgThinkingTokens: 0,
+		}];
+		const overlay = new TpsStatsOverlay(rows, testTheme, () => {}, () => ({ points, thinkingLevels: [] }));
+		overlay.handleInput("\r");
+
+		const defaultText = overlay.render(140).join("\n");
+		expect(defaultText).toContain("n[0]");
+		expect(defaultText).toContain("ttft[1]");
+		expect(defaultText).toContain("tps[2]");
+		expect(defaultText).toContain("think[3]");
+		expect(defaultText).toContain("· tps"); // tps is the default trend column
+
+		overlay.handleInput("3");
+		const thinkText = overlay.render(140).join("\n");
+		expect(thinkText).toContain("· think");
+		expect(thinkText).not.toContain("· tps");
+
+		overlay.handleInput("0");
+		expect(overlay.render(140).join("\n")).toContain("· n");
+	});
 });
