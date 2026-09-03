@@ -343,8 +343,9 @@ export class TpsStatsOverlay implements Component, Focusable {
 
   private setTrendMetric(index: number): void {
     if (!TREND_METRICS[index] || index === this.metricIndex) return;
+    // Keep the current trend window: switching the column must not jump the
+    // bucket list back to the newest page.
     this.metricIndex = index;
-    this.trendWindowStart = 0;
     this.invalidate();
   }
 
