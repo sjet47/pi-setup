@@ -1,4 +1,4 @@
-export type TpsScale = "hour" | "day" | "week";
+export type TpsScale = "hour" | "4h" | "day" | "week";
 
 export interface TpsRawEvent {
   provider: string;

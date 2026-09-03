@@ -3,7 +3,7 @@ import { border as borderText, cell as cellText, clamp, formatTimestamp, line as
 import type { ModelTpsSummary, ThinkingLevelSummary, TpsScale, TpsTrendPoint, TpsTrendResult } from "./types";
 
 const VISIBLE_ROWS = 14;
-const SCALES: TpsScale[] = ["hour", "day", "week"];
+const SCALES: TpsScale[] = ["hour", "4h", "day", "week"];
 const DEFAULT_TREND_METRIC = 2; // tps
 const TREND_METRICS: { key: "n" | "ttft" | "tps" | "think"; value: (point: TpsTrendPoint) => number }[] = [
   { key: "n", value: (point) => point.samples },
@@ -430,7 +430,7 @@ function formatInt(value: number): string {
 
 function formatBucket(timestamp: number, scale: TpsScale): string {
   const date = new Date(timestamp);
-  if (scale === "hour") {
+  if (scale === "hour" || scale === "4h") {
     return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:00`;
   }
   if (scale === "week") {

@@ -69,6 +69,13 @@ export function aggregateThinkingLevels(events: TpsRawEvent[]): ThinkingLevelSum
 
 function bucketStart(timestamp: number, scale: TpsScale): number {
   if (scale === "hour") return Math.floor(timestamp / 3_600_000) * 3_600_000;
+  if (scale === "4h") {
+    // Align to the local wall-clock 4-hour boundary (00/04/08/12/16/20) so the
+    // buckets line up with the hour-of-day the user sees.
+    const date = new Date(timestamp);
+    date.setHours(Math.floor(date.getHours() / 4) * 4, 0, 0, 0);
+    return date.getTime();
+  }
   if (scale === "day") {
     const date = new Date(timestamp);
     date.setHours(0, 0, 0, 0);
@@ -82,6 +89,7 @@ function bucketStart(timestamp: number, scale: TpsScale): number {
 
 function nextBucketStart(timestamp: number, scale: TpsScale): number {
   if (scale === "hour") return timestamp + 3_600_000;
+  if (scale === "4h") return timestamp + 4 * 60 * 60 * 1000;
   if (scale === "day") return timestamp + 24 * 60 * 60 * 1000;
   return timestamp + WEEK_MS;
 }

@@ -139,6 +139,22 @@ describe("aggregate", () => {
     expect(daily[0].avgThinkingTokens).toBeCloseTo(60);
   });
 
+  it("aggregates into 4-hour wall-clock buckets", () => {
+    const base = new Date(2026, 0, 1, 0, 0, 0).getTime(); // local 00:00
+    const events: TpsRawEvent[] = [
+      { provider: "a", model: "m", project: "p", createdAt: base + 2 * 3_600_000, thinkingLevel: "medium", ttftMs: 400, durationMs: 10_000, outputTokens: 100, reasoningTokens: 30 },
+      { provider: "a", model: "m", project: "p", createdAt: base + 3.9 * 3_600_000, thinkingLevel: "medium", ttftMs: 600, durationMs: 20_000, outputTokens: 200, reasoningTokens: 50 },
+      { provider: "a", model: "m", project: "p", createdAt: base + 4 * 3_600_000, thinkingLevel: "medium", ttftMs: 800, durationMs: 10_000, outputTokens: 300, reasoningTokens: 90 },
+    ];
+
+    const fourHourly = aggregateTrend(events, "4h");
+    expect(fourHourly).toHaveLength(2);
+    expect(fourHourly[0].bucketStart).toBe(base); // 00:00-04:00
+    expect(fourHourly[0].samples).toBe(2);
+    expect(fourHourly[1].bucketStart).toBe(base + 4 * 3_600_000); // 04:00-08:00
+    expect(fourHourly[1].samples).toBe(1);
+  });
+
   it("groups thinking tokens by level", () => {
     const events: TpsRawEvent[] = [
       { provider: "a", model: "m", project: "p", createdAt: 1, thinkingLevel: "off", ttftMs: 0, durationMs: 1000, outputTokens: 10, reasoningTokens: 0 },
