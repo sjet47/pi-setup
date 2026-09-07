@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "strict": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
   },
   "include": [
     "extensions/pi-shots",
@@ -17,6 +18,7 @@
     "extensions/pi-wakatime/src",
     "extensions/pi-wakatime/test",
     "extensions/pi-cache-graph",
-    "extensions/pi-footer"
+    "extensions/pi-footer",
+    "extensions/pi-wordle"
   ]
 }
