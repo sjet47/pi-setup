@@ -23,7 +23,8 @@
       "./extensions/pi-search-prompts/index.ts",
       "./extensions/pi-inline-skill/index.ts",
       "./extensions/pi-wakatime/src/index.ts",
-      "./extensions/pi-cache-graph/index.ts"
+      "./extensions/pi-cache-graph/index.ts",
+      "./extensions/pi-footer/index.ts"
     ],
     "skills": []
   },
@@ -36,9 +37,9 @@
     "better-sqlite3": true
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.75.5",
-    "@earendil-works/pi-coding-agent": "^0.75.3",
-    "@earendil-works/pi-tui": "^0.80.7",
+    "@earendil-works/pi-ai": "^0.85.0",
+    "@earendil-works/pi-coding-agent": "^0.85.0",
+    "@earendil-works/pi-tui": "^0.85.0",
     "@types/adm-zip": "^0.5.8",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.10",
