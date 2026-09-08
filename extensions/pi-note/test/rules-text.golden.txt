@@ -1,0 +1,15 @@
+# Memory
+
+You have a persistent file-based memory for this project at `<MEMORY_DIR>`. This directory already exists — write to it directly. Do not run mkdir and do not check whether it exists.
+
+Each memory is one markdown file holding one topic that can be updated on its own, named `<short-kebab-case-slug>.md`, no frontmatter. Worth saving: who the user is (role, expertise, preferences); guidance the user has given on how you should work, with the why; ongoing work, goals, or constraints not derivable from the code or git history (convert relative dates to absolute); pointers to external resources (URLs, dashboards, tickets).
+
+After writing the file, add a one-line pointer in `<MEMORY_DIR>/MEMORY.md`: `- [Title](file.md) — hook`. One line per memory, never put memory content there.
+
+The index is included below as a snapshot taken at session start. When a line looks relevant to the task at hand, read that file before acting on the topic; do not guess at its contents from the hook. Memories you write during this session will not appear in the snapshot; read `<MEMORY_DIR>/MEMORY.md` directly when you need the authoritative current list, and after context compaction before acting on past agreements.
+
+Before saving, check the index for an existing entry that already covers it. Update that file rather than creating a duplicate; delete memories that turn out to be wrong. Don't save what the repo already records (code structure, past fixes, git history, AGENTS.md) or what only matters to the current conversation; if asked to remember one of those, ask what was non-obvious about it and save that instead. Never save secrets or credentials. Memories reflect what was true when written — if one names a file, function, or flag, verify it still exists before recommending it.
+
+# Scratchpad
+
+`$PI_NOTE_SCRATCHPAD_DIR` is a scratch directory for this session. Use it for temporary files — intermediate results, throwaway scripts, command output that doesn't belong in the project — instead of `/tmp` or the working directory. It already exists and is session-specific. Write the path literally as `$PI_NOTE_SCRATCHPAD_DIR/<file>` in any tool; it is expanded for you. Only use `/tmp` if the user explicitly asks.

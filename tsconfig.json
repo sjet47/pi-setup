@@ -19,6 +19,7 @@
     "extensions/pi-wakatime/test",
     "extensions/pi-cache-graph",
     "extensions/pi-footer",
-    "extensions/pi-wordle"
+    "extensions/pi-wordle",
+    "extensions/pi-note"
   ]
 }
