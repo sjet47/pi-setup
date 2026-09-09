@@ -176,11 +176,11 @@ git add -A && git commit -m "..." && git push
 
 # 2. 更新 pi 运行时克隆（不然 /reload 的还是旧代码）
 cd ~/.pi/agent/git/github.com/sjet47/pi-setup
-git pull --ff-only
+git fetch origin && git merge --ff-only origin/main
 
 # 3. 如果有 dotfiles 路径也要更新
 cd ~/dotfiles/pi-agent/git/github.com/sjet47/pi-setup
-git pull --ff-only
+git fetch origin && git merge --ff-only origin/main
 ```
 
 **简便做法**（配置 git alias 或脚本一次性更新所有 clone）。
