@@ -90,6 +90,8 @@ sessionId 由 `ctx.sessionManager.getSessionId()` 给出，任何 session（含 
 
 一个文件一个可独立更新的主题，文件名 kebab-case `.md`。**没有 frontmatter**，正文就是普通 markdown：
 
+记忆只放跨会话仍成立的事实与决策；生命周期更短的内容（进行中状态、草稿、中间结果、一次性脚本、命令输出、日志）一律写 scratchpad，不写进记忆目录。
+
 ```markdown
 用 `jq` 解析 JSON，用 `glab` 处理 GitLab 任务（不预检版本/登录态，直接执行，报错再处理）。
 ```
@@ -149,9 +151,13 @@ read / write / edit / grep / find / ls 等工具不经过 shell。插件在 `too
 
 You have a persistent file-based memory for this project at `<MEMORY_DIR>`. This directory already exists — write to it directly. Do not run mkdir and do not check whether it exists.
 
-Each memory is one markdown file holding one topic that can be updated on its own, named `<short-kebab-case-slug>.md`, no frontmatter. Worth saving: who the user is (role, expertise, preferences); guidance the user has given on how you should work, with the why; ongoing work, goals, or constraints not derivable from the code or git history (convert relative dates to absolute); pointers to external resources (URLs, dashboards, tickets).
+Each memory is one markdown file holding one topic that can be updated on its own, named `<short-kebab-case-slug>.md`, no frontmatter. Worth saving: who the user is (role, expertise, preferences); guidance the user has given on how you should work, with the why; durable project or cross-project decisions and constraints not derivable from the code or git history (convert relative dates to absolute); pointers to external resources (URLs, dashboards, tickets).
+
+Memory is for what is still true in a future session — durable facts and decisions. Anything with a shorter life — in-progress state, drafts, intermediate results, throwaway scripts, command output, logs — belongs in the scratchpad, never in memory. If you are unsure whether something outlives the current task, write it to the scratchpad.
 
 After writing the file, add a one-line pointer in `<MEMORY_DIR>/MEMORY.md`: `- [Title](file.md) — hook`. One line per memory, never put memory content there.
+
+Writing a memory file and updating this index are one atomic step: never create, rename, or delete a memory file without adding, fixing, or removing its `MEMORY.md` line in the same turn. A memory file with no index line is invisible to future sessions — the index snapshot is the only recall path.
 
 The index is included below as a snapshot taken at session start. When a line looks relevant to the task at hand, read that file before acting on the topic; do not guess at its contents from the hook. Memories you write during this session will not appear in the snapshot; read `<MEMORY_DIR>/MEMORY.md` directly when you need the authoritative current list, and after context compaction before acting on past agreements.
 
@@ -159,7 +165,7 @@ Before saving, check the index for an existing entry that already covers it. Upd
 
 # Scratchpad
 
-`$PI_NOTE_SCRATCHPAD_DIR` is a scratch directory for this session. Use it for temporary files — intermediate results, throwaway scripts, command output that doesn't belong in the project — instead of `/tmp` or the working directory. It already exists and is session-specific. Write the path literally as `$PI_NOTE_SCRATCHPAD_DIR/<file>` in any tool; it is expanded for you. Only use `/tmp` if the user explicitly asks.
+`$PI_NOTE_SCRATCHPAD_DIR` is a scratch directory for this session. Use it for temporary files — intermediate results, throwaway scripts, command output that doesn't belong in the project — instead of `/tmp`, the working directory, or the memory directory. It already exists and is session-specific. Write the path literally as `$PI_NOTE_SCRATCHPAD_DIR/<file>` in any tool; it is expanded for you. Only use `/tmp` if the user explicitly asks.
 ````
 
 ## 8. User Story
@@ -214,6 +220,12 @@ Before saving, check the index for an existing entry that already covers it. Upd
 **Given** 记忆根目录建不出来（磁盘只读、路径被占为普通文件）
 **When** session 开始
 **Then** 一条 error notify；system prompt 不含任何 pi-note 文本，`$PI_NOTE_SCRATCHPAD_DIR` 不展开；session 其余功能不受影响。
+
+### US-10：临时内容不进记忆
+
+**Given** agent 手头有中间结果、草稿、一次性脚本、日志这类内容
+**When** 它想把这些落盘
+**Then** 写到 `$PI_NOTE_SCRATCHPAD_DIR/`，不写进记忆目录——记忆只收跨会话仍成立的事实与决策；拿不准是否跨任务有效时，一律写 scratchpad。
 
 ## 9. 验收标准
 
