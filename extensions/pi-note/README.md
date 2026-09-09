@@ -1,7 +1,7 @@
 # pi-note
 
 Project-level **file-based memory** + a per-session **scratchpad dir** for pi,
-ported from Claude Code's two mechanisms. Full behavioral spec: `../../SPEC.md`.
+ported from Claude Code's two mechanisms. Full behavioral spec: `../../docs/pi-note.md`.
 
 Three hooks, **no registered tools or commands** — nothing appears in the UI
 unless memory init fails (one error notify).

@@ -1,5 +1,5 @@
 // pi-note — persistent file-based memory (project-level) + per-session
-// scratchpad for pi. Port of Claude Code's two mechanisms (SPEC.md).
+// scratchpad for pi. Port of Claude Code's two mechanisms (docs/pi-note.md).
 //
 // Three hooks, no registered tools or commands (SPEC §2):
 //   session_start        create dirs, export PI_NOTE_SCRATCHPAD_DIR, snapshot MEMORY.md
