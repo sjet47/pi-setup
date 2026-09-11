@@ -82,9 +82,13 @@ function bucketStart(timestamp: number, scale: TpsScale): number {
     return date.getTime();
   }
   const dayStart = new Date(timestamp);
-  dayStart.setHours(0, 0, 0, 0);
-  const weekdayOffset = (dayStart.getDay() + 6) % 7;
-  return dayStart.getTime() - weekdayOffset * 24 * 60 * 60 * 1000;
+  // Subtract on the calendar, not in elapsed milliseconds: a week that spans a
+  // DST shift still has to start at local midnight.
+  return new Date(
+    dayStart.getFullYear(),
+    dayStart.getMonth(),
+    dayStart.getDate() - ((dayStart.getDay() + 6) % 7),
+  ).getTime();
 }
 
 function nextBucketStart(timestamp: number, scale: TpsScale): number {

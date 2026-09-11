@@ -15,6 +15,11 @@ import {
 import { SkillStatsOverlay } from "./stats-overlay";
 import { SQLiteStatsStore, type StatsStore, type ToolUsageAggregate, type UsageAggregate } from "./store";
 import { registerTpsStatsExtension } from "./tps";
+import type { TrendScale } from "./trend-scale";
+
+// Enough buckets that ←/→ paging stays useful at every scale without pulling
+// unbounded history into the overlay.
+const TREND_BUCKETS = 500;
 
 export default function skillStatsExtension(pi: ExtensionAPI) {
 	let store: StatsStore | undefined;
@@ -275,9 +280,9 @@ async function showStatsOverlay(
 	kind: "skill" | "tool",
 ): Promise<void> {
 	const project = scope === "all" ? undefined : ctx.cwd;
-	const getTrend = (name: string) => kind === "tool"
-		? store.queryToolTrend({ tool: name, project, limit: 30 })
-		: store.querySkillTrend({ skill: name, project, limit: 30 });
+	const getTrend = (name: string, scale: TrendScale) => kind === "tool"
+		? store.queryToolTrend({ tool: name, project, scale, limit: TREND_BUCKETS })
+		: store.querySkillTrend({ skill: name, project, scale, limit: TREND_BUCKETS });
 	await ctx.ui.custom<null>(
 		(tui, theme, _keybindings, done) => {
 			const overlay = new SkillStatsOverlay(rows, scope, theme, query, () => done(null), kind, getTrend);

@@ -1,7 +1,8 @@
 import type { Component, Focusable } from "@earendil-works/pi-tui";
 import { fuzzyFilter, Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { border as borderText, cell as cellText, clamp, formatTimestamp, line as lineText, type StatsOverlayTheme } from "./overlay-common";
+import { border as borderText, cell as cellText, clamp, formatTimestamp, formatTrendBucket, line as lineText, type StatsOverlayTheme } from "./overlay-common";
 import type { ToolUsageAggregate, UsageAggregate, UsageTrendPoint } from "./store";
+import { TREND_SCALES, type TrendScale } from "./trend-scale";
 
 export { formatTimestamp };
 
@@ -20,7 +21,9 @@ export class SkillStatsOverlay implements Component, Focusable {
 	private _focused = false;
 	private selectedIndex = 0;
 	private windowStart = 0;
+	private trendWindowStart = 0;
 	private mode: OverlayMode = "list";
+	private scale: TrendScale = "day";
 
 	constructor(
 		private readonly rows: UsageStatsRow[],
@@ -29,7 +32,7 @@ export class SkillStatsOverlay implements Component, Focusable {
 		initialQuery: string,
 		private readonly onClose: () => void,
 		private readonly kind: StatsKind = "skill",
-		private readonly getTrend: (name: string) => UsageTrendPoint[] = () => [],
+		private readonly getTrend: (name: string, scale: TrendScale) => UsageTrendPoint[] = () => [],
 	) {
 		this.searchInput.setValue(initialQuery);
 		this.searchInput.onEscape = onClose;
@@ -55,6 +58,32 @@ export class SkillStatsOverlay implements Component, Focusable {
 				this.mode = "list";
 				this.searchInput.focused = this._focused;
 				this.invalidate();
+				return;
+			}
+			if (matchesKey(data, Key.tab)) {
+				this.cycleScale(1);
+				return;
+			}
+			if (matchesKey(data, Key.shift("tab"))) {
+				this.cycleScale(-1);
+				return;
+			}
+			// ←/→ page the trend: newer buckets sit at the top, so left pages
+			// toward older buckets and right snaps back toward the newest page.
+			if (matchesKey(data, Key.left)) {
+				this.moveTrendWindow(VISIBLE_ROWS);
+				return;
+			}
+			if (matchesKey(data, Key.right)) {
+				this.moveTrendWindow(-VISIBLE_ROWS);
+				return;
+			}
+			if (matchesKey(data, Key.up)) {
+				this.moveTrendWindow(-1);
+				return;
+			}
+			if (matchesKey(data, Key.down)) {
+				this.moveTrendWindow(1);
 				return;
 			}
 			return;
@@ -127,7 +156,7 @@ export class SkillStatsOverlay implements Component, Focusable {
 
 		lines.push(
 			this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
-			this.line(this.theme.fg("dim", `↑/↓ select · Enter trend · Type to search ${this.kind} · Esc close`), contentWidth),
+			this.line(this.theme.fg("dim", `↑/↓ select · Enter trend · Type to search ${this.kind} · Esc close${this.scope === "project" ? ` · /${this.kind}-stats all → every project` : ""}`), contentWidth),
 			this.border("bottom", safeWidth),
 		);
 		return lines;
@@ -141,47 +170,75 @@ export class SkillStatsOverlay implements Component, Focusable {
 		}
 		const name = this.rowName(row);
 		const trend = this.trendFor(name);
+		// Newest bucket first: windowStart 0 shows the latest page and grows
+		// toward the past.
+		const descending = [...trend].reverse();
+		this.trendWindowStart = clamp(this.trendWindowStart, 0, Math.max(0, descending.length - VISIBLE_ROWS));
+		const visible = descending.slice(this.trendWindowStart, this.trendWindowStart + VISIBLE_ROWS);
 		const maxTotal = Math.max(1, ...trend.map((point) => point.total));
 		const countWidth = Math.max(5, String(maxTotal).length);
-		const bucketWidth = 10;
+		const bucketWidth = this.scale === "week" ? 24 : 17;
 		const separatorWidth = 4;
 		const barWidth = Math.max(1, contentWidth - bucketWidth - countWidth - separatorWidth);
 		const title = `${this.itemLabel()} trend · ${name}`;
 		const lines = [
 			this.border("top", safeWidth),
 			this.line(`${this.theme.fg("accent", this.theme.bold(title))}  ${this.theme.fg("dim", `${row.total} total`)}`, contentWidth),
+			this.renderScaleTabs(contentWidth),
 			this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
 		];
 
 		if (trend.length === 0) {
-			lines.push(this.line(this.theme.fg("muted", "No historical usage points found."), contentWidth));
+			lines.push(this.line(this.theme.fg("muted", `No ${this.scale} buckets recorded.`), contentWidth));
 		} else {
-			for (const point of trend) {
+			for (const point of visible) {
 				const filled = Math.max(1, Math.round((point.total / maxTotal) * barWidth));
 				const bar = this.theme.fg("success", "█".repeat(filled)) + this.theme.fg("borderMuted", "░".repeat(Math.max(0, barWidth - filled)));
-				lines.push(this.line(`${this.cell(point.bucket, bucketWidth)}  ${bar}  ${this.cell(String(point.total), countWidth, "right")}`, contentWidth));
+				lines.push(this.line(`${this.cell(formatTrendBucket(this.scale, point.bucketStart), bucketWidth)}  ${bar}  ${this.cell(String(point.total), countWidth, "right")}`, contentWidth));
 			}
 		}
 
 		lines.push(
 			this.line(this.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth),
-			this.line(this.theme.fg("dim", "Enter/Esc back · Ctrl-C close"), contentWidth),
+			this.line(this.theme.fg("dim", `Tab/⇧Tab scale · ←/→ page · ↑/↓ scroll · Enter/Esc back`), contentWidth),
 			this.border("bottom", safeWidth),
 		);
 		return lines;
 	}
 
+	private renderScaleTabs(contentWidth: number): string {
+		const labels = TREND_SCALES.map((scale) => this.scale === scale
+			? this.theme.fg("accent", `[${scale}]`)
+			: this.theme.fg("muted", scale));
+		return this.line(`${this.theme.fg("dim", "Scale:")} ${labels.join("  ")}`, contentWidth);
+	}
+
 	private trendFor(name: string): UsageTrendPoint[] {
-		const cached = this.trendCache.get(name);
+		const key = `${name}\u0000${this.scale}`;
+		const cached = this.trendCache.get(key);
 		if (cached) return cached;
 		let trend: UsageTrendPoint[];
 		try {
-			trend = this.getTrend(name);
+			trend = this.getTrend(name, this.scale);
 		} catch {
 			trend = [];
 		}
-		this.trendCache.set(name, trend);
+		this.trendCache.set(key, trend);
 		return trend;
+	}
+
+	private cycleScale(delta: number): void {
+		const current = TREND_SCALES.indexOf(this.scale);
+		this.scale = TREND_SCALES[clamp(current + delta, 0, TREND_SCALES.length - 1)];
+		this.trendWindowStart = 0;
+		this.invalidate();
+	}
+
+	private moveTrendWindow(delta: number): void {
+		const row = this.selectedRow();
+		const buckets = row ? this.trendFor(this.rowName(row)).length : 0;
+		this.trendWindowStart = clamp(this.trendWindowStart + delta, 0, Math.max(0, buckets - VISIBLE_ROWS));
+		this.invalidate();
 	}
 
 	private renderSearch(contentWidth: number): string {
@@ -237,6 +294,7 @@ export class SkillStatsOverlay implements Component, Focusable {
 	private openSelected(): void {
 		if (!this.selectedRow()) return;
 		this.mode = "detail";
+		this.trendWindowStart = 0;
 		this.searchInput.focused = false;
 		this.invalidate();
 	}

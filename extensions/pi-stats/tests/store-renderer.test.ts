@@ -8,102 +8,33 @@ import { SQLiteStatsStore, type ToolUsageEvent, type UsageEvent } from "../src/s
 // this makes the suite independent of the machine timezone either way).
 process.env.TZ = "UTC";
 
-function localDateBucket(createdAt: number): string {
-	const date = new Date(createdAt * 1000);
-	const pad = (value: number) => String(value).padStart(2, "0");
-	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-function createFakeDatabase(columns: Array<{ name: string }> = [
-	{ name: "id" },
-	{ name: "skill" },
-	{ name: "project" },
-	{ name: "created_at" },
-	{ name: "origin_key" },
-]) {
-	const events: UsageEvent[] = [];
-	const toolEvents: ToolUsageEvent[] = [];
-	const executedSql: string[] = [];
-	const db = {
-		schemaInitialized: false,
-		executedSql,
-		pragma(_directive: string) {},
-		exec(sql: string) {
-			this.schemaInitialized = true;
-			executedSql.push(sql);
-		},
-		prepare(sql: string) {
-			if (sql.startsWith("pragma table_info")) {
-				return { all: () => columns };
-			}
-			if (sql.includes("sqlite_master")) {
-				return { all: () => [] };
-			}
-			if (sql.startsWith("insert")) {
-				return {
-					run(name: string, project: string, createdAt: number, originKey?: string | null) {
-						if (originKey && events.some((event) => event.originKey === originKey)) return { changes: 0 };
-						if (originKey && toolEvents.some((event) => event.originKey === originKey)) return { changes: 0 };
-						if (sql.includes("tool_usage_events")) {
-							toolEvents.push({ tool: name, project, createdAt, originKey: originKey ?? undefined });
-						} else {
-							events.push({ skill: name, project, createdAt, originKey: originKey ?? undefined });
-						}
-						return { changes: 1 };
-					},
-				};
-			}
-			return {
-				all(...params: unknown[]) {
-					const sourceEvents = sql.includes("tool_usage_events") ? toolEvents : events;
-					if (sql.includes("date(created_at")) {
-						const hasProject = sql.includes("and project = ?");
-						const name = String(params[0]);
-						const project = hasProject ? String(params[1]) : undefined;
-						const limit = Number(params[hasProject ? 2 : 1]);
-						const filtered = sourceEvents.filter((event) => {
-							const eventName = "tool" in event ? event.tool : event.skill;
-							return eventName === name && (!project || event.project === project);
-						});
-						const byBucket = new Map<string, { bucket: string; total: number; lastUsed: number }>();
-						for (const event of filtered) {
-							const bucket = localDateBucket(event.createdAt ?? 0);
-							const row = byBucket.get(bucket) ?? { bucket, total: 0, lastUsed: 0 };
-							row.total += 1;
-							row.lastUsed = Math.max(row.lastUsed, event.createdAt ?? 0);
-							byBucket.set(bucket, row);
-						}
-						return [...byBucket.values()].sort((left, right) => right.lastUsed - left.lastUsed).slice(0, limit);
-					}
-
-					const hasProject = sql.includes("where project = ?");
-					const project = hasProject ? String(params[0]) : undefined;
-					const limit = Number(params[hasProject ? 1 : 0]);
-					const filtered = project ? sourceEvents.filter((event) => event.project === project) : sourceEvents;
-					const byName = new Map<string, { skill?: string; tool?: string; total: number; lastUsed: number }>();
-					for (const event of filtered) {
-						const name = "tool" in event ? event.tool : event.skill;
-						const row = byName.get(name) ?? ("tool" in event
-							? { tool: name, total: 0, lastUsed: 0 }
-							: { skill: name, total: 0, lastUsed: 0 });
-						row.total += 1;
-						row.lastUsed = Math.max(row.lastUsed, event.createdAt ?? 0);
-						byName.set(name, row);
-					}
-					return [...byName.values()]
-						.sort((left, right) => right.total - left.total || right.lastUsed - left.lastUsed || rowName(left).localeCompare(rowName(right)))
-						.slice(0, limit);
-				},
-			};
-		},
-		close() {},
-	};
-	return db;
-}
-
 import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { TREND_SCALES, type TrendScale } from "../src/trend-scale";
+
+function localDateBucket(createdAt: number): number {
+	const date = new Date(createdAt * 1000);
+	return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+function localHourBucket(createdAt: number): number {
+	return Math.floor((createdAt * 1000) / 3_600_000) * 3_600_000;
+}
+
+// Reference bucketing mirroring the SQL in store.ts; the week case subtracts on
+// the calendar so a DST week still starts at local midnight.
+function expectedBucket(createdAt: number, scale: TrendScale): number {
+	if (scale === "hour") return localHourBucket(createdAt);
+	const date = new Date(createdAt * 1000);
+	if (scale === "4h") {
+		return new Date(date.getFullYear(), date.getMonth(), date.getDate(), Math.floor(date.getHours() / 4) * 4).getTime();
+	}
+	if (scale === "week") {
+		return new Date(date.getFullYear(), date.getMonth(), date.getDate() - ((date.getDay() + 6) % 7)).getTime();
+	}
+	return localDateBucket(createdAt);
+}
 
 async function createStore() {
 	const dir = mkdtempSync(join(tmpdir(), "pi-stats-test-"));
@@ -164,8 +95,8 @@ describe("SQLiteStatsStore", () => {
 		store.insert({ skill: "tdd", project: "/b", createdAt: 1_700_100_000 });
 
 		expect(store.querySkillTrend({ skill: "tdd", project: "/a" })).toEqual([
-			{ bucket: "2023-11-14", total: 2 },
-			{ bucket: "2023-11-16", total: 1 },
+			{ bucketStart: localDateBucket(1_700_000_000), total: 2 },
+			{ bucketStart: localDateBucket(1_700_100_000), total: 1 },
 		]);
 	});
 
@@ -175,10 +106,27 @@ describe("SQLiteStatsStore", () => {
 		store.insertTool({ tool: "read", project: "/a", createdAt: 1_700_100_000 });
 		store.insertTool({ tool: "bash", project: "/a", createdAt: 1_700_100_000 });
 
-		expect(store.queryToolTrend({ tool: "read", project: "/a" })).toEqual([
-			{ bucket: "2023-11-14", total: 1 },
-			{ bucket: "2023-11-16", total: 1 },
+		expect(store.queryToolTrend({ tool: "read", project: "/a", scale: "day" })).toEqual([
+			{ bucketStart: localDateBucket(1_700_000_000), total: 1 },
+			{ bucketStart: localDateBucket(1_700_100_000), total: 1 },
 		]);
+
+		expect(store.queryToolTrend({ tool: "read", project: "/a", scale: "week" })).toEqual([
+			{ bucketStart: expectedBucket(1_700_100_000, "week"), total: 2 },
+		]);
+
+		expect(store.queryToolTrend({ tool: "read", project: "/a", scale: "hour" })).toEqual([
+			{ bucketStart: localHourBucket(1_700_000_000), total: 1 },
+			{ bucketStart: localHourBucket(1_700_100_000), total: 1 },
+		]);
+
+		// Every scale bucket starts at a boundary the shared reference agrees on.
+		for (const scale of TREND_SCALES) {
+			const buckets = store.queryToolTrend({ tool: "read", project: "/a", scale });
+			expect(buckets.map((point) => point.bucketStart)).toEqual([
+				...new Set([1_700_000_000, 1_700_100_000].map((at) => expectedBucket(at, scale))),
+			]);
+		}
 	});
 
 	test("recovers an unreadable database file at startup", () => {
@@ -253,7 +201,8 @@ describe("SkillStatsOverlay", () => {
 	});
 
 	test("opens selected row trend chart lazily", () => {
-		const requested: string[] = [];
+		const requested: Array<{ name: string; scale: string }> = [];
+		const day = (dayOfMonth: number) => new Date(2026, 5, dayOfMonth).getTime();
 		const overlay = new SkillStatsOverlay(
 			[
 				{ skill: "diagnose", total: 3, lastUsed: 30 },
@@ -264,9 +213,11 @@ describe("SkillStatsOverlay", () => {
 			"",
 			() => {},
 			"skill",
-			(name) => {
-				requested.push(name);
-				return name === "tdd" ? [{ bucket: "2026-06-08", total: 1 }, { bucket: "2026-06-09", total: 2 }] : [];
+			(name, scale) => {
+				requested.push({ name, scale });
+				return name === "tdd"
+					? [{ bucketStart: day(8), total: 1 }, { bucketStart: day(9), total: 2 }]
+					: [];
 			},
 		);
 
@@ -274,10 +225,71 @@ describe("SkillStatsOverlay", () => {
 		overlay.handleInput("\x1b[B");
 		overlay.handleInput("\r");
 		const output = overlay.render(100).join("\n");
-		expect(requested).toEqual(["tdd"]);
+		expect(requested).toEqual([{ name: "tdd", scale: "day" }]);
 		expect(output).toContain("Skill trend · tdd");
 		expect(output).toContain("2026-06-08");
 		expect(output).toContain("2026-06-09");
+	});
+
+	test("cycles the trend scale with Tab and refetches that scale", () => {
+		const requested: Array<{ name: string; scale: string }> = [];
+		const overlay = new SkillStatsOverlay(
+			[{ skill: "tdd", total: 2, lastUsed: 20 }],
+			"project",
+			testTheme,
+			"",
+			() => {},
+			"skill",
+			(name, scale) => {
+				requested.push({ name, scale });
+				return [{ bucketStart: new Date(2026, 5, 9, 13).getTime(), total: 2 }];
+			},
+		);
+
+		overlay.handleInput("\r");
+		expect(overlay.render(100).join("\n")).toContain("[day]");
+
+		overlay.handleInput("\t");
+		const weekly = overlay.render(100).join("\n");
+		expect(requested.map((entry) => entry.scale)).toEqual(["day", "week"]);
+		expect(weekly).toContain("[week]");
+		expect(weekly).toContain("2026-06-09 ~ 2026-06-15");
+
+		// The cached day bucket is reused instead of refetched.
+		overlay.handleInput("\u001b[Z");
+		expect(overlay.render(100).join("\n")).toContain("[day]");
+		expect(requested.map((entry) => entry.scale)).toEqual(["day", "week"]);
+	});
+
+	test("pages the trend window with arrow keys", () => {
+		const points = Array.from({ length: 25 }, (_, index) => ({
+			bucketStart: new Date(2026, 5, 1 + index).getTime(),
+			total: index + 1,
+		}));
+		const overlay = new SkillStatsOverlay(
+			[{ skill: "tdd", total: 2, lastUsed: 20 }],
+			"project",
+			testTheme,
+			"",
+			() => {},
+			"skill",
+			() => points,
+		);
+
+		overlay.handleInput("\r");
+		const newestPage = overlay.render(100).join("\n");
+		expect(newestPage).toContain("2026-06-25");
+		expect(newestPage).not.toContain("2026-06-01");
+
+		// A page is 20 rows, so one left press reaches the oldest bucket.
+		overlay.handleInput("\x1b[D");
+		const oldestPage = overlay.render(100).join("\n");
+		expect(oldestPage).toContain("2026-06-01");
+		expect(oldestPage).not.toContain("2026-06-25");
+
+		// Right snaps back toward the newest page.
+		overlay.handleInput("\x1b[C");
+		expect(overlay.render(100).join("\n")).toContain("2026-06-25");
 	});
 
 	test("scrolls the list window to keep the selection visible", () => {

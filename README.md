@@ -36,6 +36,17 @@ pi install git:github.com/sjet47/pi-setup@v0.1.0
 
 `pi-stats` stores config and data under `~/.pi/agent/pi-stats/`, using one `stats.sqlite` for skill/tool/TPS stats.
 
+Commands:
+
+| Command | What it shows |
+|---------|---------------|
+| `/skill-stats [all] [query]` | Skill usage, aggregated over the current project (or every project with `all`) |
+| `/tool-stats [all] [query]` | Tool call counts, same scope rules |
+| `/tps-stats` | Provider/model throughput, TTFT and thinking-token trends |
+| `/skill-stats scan`, `/tool-stats scan` | Re-read `~/.pi/agent/sessions` into the database instead of showing stats |
+
+Overlay keys — list: `↑/↓` select, `Enter` open the trend, type to filter, `Esc` close. Trend: `Tab`/`⇧Tab` cycle the bucket scale (`hour`/`4h`/`day`/`week`), `←`/`→` page through buckets, `↑`/`↓` scroll one bucket, `Enter`/`Esc` back (`0`-`3` also pick the TPS trend column).
+
 ## Selective Loading
 
 Only want specific extensions? Filter in `settings.json`:

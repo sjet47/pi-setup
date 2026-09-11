@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import Database from "better-sqlite3";
 import { configureDb } from "./sqlite";
 import { aggregateThinkingLevels, aggregateTrend } from "./tps/aggregate";
+import type { TrendScale } from "./trend-scale";
 import type {
   ModelTpsSummary,
   TpsRawEvent,
@@ -41,7 +42,8 @@ export interface ToolUsageAggregate {
 }
 
 export interface UsageTrendPoint {
-	bucket: string;
+	/** Start of the bucket, epoch ms, matching TpsTrendPoint. */
+	bucketStart: number;
 	total: number;
 }
 
@@ -50,8 +52,8 @@ export interface SkillStatsStore {
 	insertTool(event: ToolUsageEvent): boolean;
 	queryTop(options: { project?: string; limit?: number }): UsageAggregate[];
 	queryTopTools(options: { project?: string; limit?: number }): ToolUsageAggregate[];
-	querySkillTrend(options: { skill: string; project?: string; limit?: number }): UsageTrendPoint[];
-	queryToolTrend(options: { tool: string; project?: string; limit?: number }): UsageTrendPoint[];
+	querySkillTrend(options: { skill: string; project?: string; scale?: TrendScale; limit?: number }): UsageTrendPoint[];
+	queryToolTrend(options: { tool: string; project?: string; scale?: TrendScale; limit?: number }): UsageTrendPoint[];
 	close(): void;
 }
 
@@ -70,6 +72,21 @@ const DEFAULT_DATA_DIR = join(homedir(), ".pi", "agent", "pi-stats");
 const DB_FILENAME = "stats.sqlite";
 const DEFAULT_SINCE_DAYS = 90;
 const DEFAULT_EVENT_LIMIT = 20_000;
+const DEFAULT_TREND_SCALE: TrendScale = "day";
+const DEFAULT_TREND_BUCKETS = 30;
+
+// Bucket starts, epoch ms, computed in SQLite's local timezone. These mirror
+// tps/aggregate.ts: only "hour" is anchored to the epoch, every other scale
+// hangs off the local start of day so a bucket is a wall-clock boundary even
+// across a DST shift.
+const LOCAL_TIMESTAMP = "created_at, 'unixepoch', 'localtime'";
+const LOCAL_DAY_START = `date(${LOCAL_TIMESTAMP}, 'start of day')`;
+const USAGE_BUCKET_SQL: Record<TrendScale, string> = {
+	hour: "((created_at / 3600) * 3600) * 1000",
+	"4h": `strftime('%s', ${LOCAL_DAY_START}, '+' || ((strftime('%H', ${LOCAL_TIMESTAMP}) / 4) * 4) || ' hours', 'utc') * 1000`,
+	day: `strftime('%s', ${LOCAL_DAY_START}, 'utc') * 1000`,
+	week: `strftime('%s', ${LOCAL_DAY_START}, '-' || ((strftime('%w', ${LOCAL_TIMESTAMP}) + 6) % 7) || ' days', 'utc') * 1000`,
+};
 // WAL + busy_timeout give us cross-process safety without any file locking of
 // our own: each insert is an atomic autocommit transaction.
 
@@ -201,40 +218,41 @@ export class SqlJsStatsStore implements StatsStore {
 		}));
 	}
 
-	querySkillTrend(options: { skill: string; project?: string; limit?: number }): UsageTrendPoint[] {
+	querySkillTrend(options: { skill: string; project?: string; scale?: TrendScale; limit?: number }): UsageTrendPoint[] {
 		this.ensureUsable();
-		return this.queryUsageTrend("skill_usage_events", "skill", { name: options.skill, project: options.project, limit: options.limit });
+		return this.queryUsageTrend("skill_usage_events", "skill", { name: options.skill, project: options.project, scale: options.scale, limit: options.limit });
 	}
 
-	queryToolTrend(options: { tool: string; project?: string; limit?: number }): UsageTrendPoint[] {
+	queryToolTrend(options: { tool: string; project?: string; scale?: TrendScale; limit?: number }): UsageTrendPoint[] {
 		this.ensureUsable();
-		return this.queryUsageTrend("tool_usage_events", "tool", { name: options.tool, project: options.project, limit: options.limit });
+		return this.queryUsageTrend("tool_usage_events", "tool", { name: options.tool, project: options.project, scale: options.scale, limit: options.limit });
 	}
 
 	private queryUsageTrend(
 		table: string,
 		nameColumn: string,
-		options: { name: string; project?: string; limit?: number },
+		options: { name: string; project?: string; scale?: TrendScale; limit?: number },
 	): UsageTrendPoint[] {
-		const limit = options.limit ?? 30;
+		const bucket = USAGE_BUCKET_SQL[options.scale ?? DEFAULT_TREND_SCALE];
+		const limit = options.limit ?? DEFAULT_TREND_BUCKETS;
 		const projectClause = options.project ? "and project = ?" : "";
 		const params: unknown[] = options.project
 			? [options.name, options.project, limit]
 			: [options.name, limit];
 		const rows = this.db
 			.prepare(
-				`select date(created_at, 'unixepoch', 'localtime') as bucket,
+				`select ${bucket} as bucketStart,
 				        count(*) as total,
 				        max(created_at) as lastUsed
 				 from ${table}
 				 where ${nameColumn} = ? ${projectClause}
-				 group by bucket
+				 group by bucketStart
 				 order by lastUsed desc
 				 limit ?`,
 			)
-			.all(...params) as Array<{ bucket: string; total: number }>;
+			.all(...params) as Array<{ bucketStart: number; total: number }>;
 		return rows.map((row) => ({
-			bucket: String(row.bucket),
+			bucketStart: Number(row.bucketStart),
 			total: Number(row.total),
 		})).reverse();
 	}

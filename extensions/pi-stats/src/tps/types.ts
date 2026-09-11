@@ -1,4 +1,6 @@
-export type TpsScale = "hour" | "4h" | "day" | "week";
+import type { TrendScale } from "../trend-scale";
+
+export type TpsScale = TrendScale;
 
 export interface TpsRawEvent {
   provider: string;

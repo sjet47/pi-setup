@@ -1,4 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { TrendScale } from "./trend-scale";
 
 export type StatsOverlayColor = "accent" | "border" | "borderMuted" | "dim" | "muted" | "success" | "warning";
 
@@ -35,6 +36,18 @@ export function formatTimestamp(timestamp: number, variant: "long" | "short" = "
 
 export function pad2(value: number): string {
 	return String(value).padStart(2, "0");
+}
+
+/** Renders a trend bucket start (epoch ms, local time) for the given scale. */
+export function formatTrendBucket(scale: TrendScale, timestampMs: number): string {
+	const date = new Date(timestampMs);
+	const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+	if (scale === "hour" || scale === "4h") return `${day} ${pad2(date.getHours())}:00`;
+	if (scale === "week") {
+		const end = new Date(timestampMs + 6 * 24 * 60 * 60 * 1000);
+		return `${day} ~ ${end.getFullYear()}-${pad2(end.getMonth() + 1)}-${pad2(end.getDate())}`;
+	}
+	return day;
 }
 
 export function clamp(value: number, min: number, max: number): number {

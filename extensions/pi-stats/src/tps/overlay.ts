@@ -1,9 +1,9 @@
 import { fuzzyFilter, Input, Key, matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable } from "@earendil-works/pi-tui";
-import { border as borderText, cell as cellText, clamp, formatTimestamp, line as lineText, pad2, type StatsOverlayTheme } from "../overlay-common";
+import { border as borderText, cell as cellText, clamp, formatTimestamp, formatTrendBucket, line as lineText, type StatsOverlayTheme } from "../overlay-common";
+import { TREND_SCALES } from "../trend-scale";
 import type { ModelTpsSummary, ThinkingLevelSummary, TpsScale, TpsTrendPoint, TpsTrendResult } from "./types";
 
 const VISIBLE_ROWS = 14;
-const SCALES: TpsScale[] = ["hour", "4h", "day", "week"];
 const DEFAULT_TREND_METRIC = 2; // tps
 const TREND_METRICS: { key: "n" | "ttft" | "tps" | "think"; value: (point: TpsTrendPoint) => number }[] = [
   { key: "n", value: (point) => point.samples },
@@ -211,7 +211,7 @@ export class TpsStatsOverlay implements Component, Focusable {
         const bar = this.theme.fg("success", "█".repeat(filled)) + this.theme.fg("borderMuted", "░".repeat(Math.max(0, barWidth - filled)));
         lines.push(
           this.line(
-            `${this.cell(formatBucket(point.bucketStart, this.scale), bucketWidth)} ` +
+            `${this.cell(formatTrendBucket(this.scale, point.bucketStart), bucketWidth)} ` +
               `${this.cell(String(point.samples), samplesWidth, "right")} ` +
               `${this.cell(formatTtft(point.avgTtftMs), ttftWidth, "right")} ` +
               `${this.cell(formatTps(point.avgTps), tpsWidth, "right")} ` +
@@ -283,7 +283,7 @@ export class TpsStatsOverlay implements Component, Focusable {
   }
 
   private renderScaleTabs(contentWidth: number): string {
-    const labels = SCALES.map((scale) => this.scale === scale
+    const labels = TREND_SCALES.map((scale) => this.scale === scale
       ? this.theme.fg("accent", `[${scale}]`)
       : this.theme.fg("muted", scale));
     const line = `${this.theme.fg("dim", "Scale:")} ${labels.join("  ")}`;
@@ -335,8 +335,8 @@ export class TpsStatsOverlay implements Component, Focusable {
   }
 
   private cycleScale(delta: number): void {
-    const current = SCALES.indexOf(this.scale);
-    this.scale = SCALES[clamp(current + delta, 0, SCALES.length - 1)];
+    const current = TREND_SCALES.indexOf(this.scale);
+    this.scale = TREND_SCALES[clamp(current + delta, 0, TREND_SCALES.length - 1)];
     this.trendWindowStart = 0;
     this.invalidate();
   }
@@ -426,19 +426,6 @@ function formatInt(value: number): string {
   if (!Number.isFinite(value)) return "-";
   if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
   return Math.round(value).toString();
-}
-
-function formatBucket(timestamp: number, scale: TpsScale): string {
-  const date = new Date(timestamp);
-  if (scale === "hour" || scale === "4h") {
-    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:00`;
-  }
-  if (scale === "week") {
-    const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
-    const end = new Date(date.getTime() + 6 * 24 * 60 * 60 * 1000);
-    return `${day} ~ ${end.getFullYear()}-${pad2(end.getMonth() + 1)}-${pad2(end.getDate())}`;
-  }
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
 }
 
 function truncate(value: string, width: number): string {
