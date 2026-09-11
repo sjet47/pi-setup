@@ -99,6 +99,12 @@ send_shortcut 后  [ ... FOCUS-IN KEY FOCUS-OUT ]
 
 仍需注意：截图与后续输入之间 UI 可能变化——**坐标映射正确 ≠ 目标状态不变**（见 §1.6）。
 
+**厂商文档同样要求这么做**（这条公式不是我个人的偏好，是两家官方的一致要求）：
+
+- Anthropic：`keep the scale factor you used so you can map those coordinates back to your screen`，并要求 `resize each screenshot before returning it and scale Claude's returned coordinates back to the original screen space`（[computer-use-tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool)）
+- OpenAI：`make sure you remap model-generated coordinates from the downscaled coordinate space to the original image's coordinate space`（[integration](https://developers.openai.com/api/docs/guides/tools-computer-use-integration)）
+- Anthropic 说得更直白：`Claude returns absolute pixel coordinates relative to the image it sees after resizing`（[vision](https://platform.claude.com/docs/en/build-with-claude/vision)）→ **图片一旦被缩放，坐标空间就变了**
+
 ### 1.4 定位 grounding：AT-SPI vs 视觉
 
 **AT-SPI 在本机基本没用**（实测）：
@@ -129,7 +135,30 @@ send_shortcut 后  [ ... FOCUS-IN KEY FOCUS-OUT ]
 
 **正确结论：单步 grounding 仍在 35–47%；zoom-in / agentic 方法可到 60–82%。两者都不能直接当任务成功率，必须用当前 pi 模型 + 实际传图格式做端到端评测。**
 
-**分辨率纪律（首版措辞有误）**：API 文档给的是**分任务建议**——桌面 `1024x768` 或 `1280x720`、网页 `1280x800` 或 `1366x768`，外加 `Avoid resolutions above 1920x1080`；真正的硬限是**模型图像上限**（按模型为 1568px/1.15MP 或 2576px/3.75MP），**不是 XGA**。而「≤ XGA」出自**参考实现 README** 的建议，不是 API 要求。确定成立的是：**API 不会替你缩放，超尺寸图会被直接拒**，所以必须自行降采样。
+**分辨率纪律（首版措辞有误）**：API 文档给的是**分任务建议**——桌面 `1024x768` 或 `1280x720`、网页 `1280x800` 或 `1366x768`，外加 `Avoid resolutions above 1920x1080`。而「≤ XGA」出自**参考实现 README** 的建议，不是 API 要求。真正的硬限是模型图像上限，见下。
+
+#### 1.4.1 图片限制与缩放纪律（官方数字，实现前必读）
+
+**Anthropic**（[computer-use-tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool)、[vision](https://platform.claude.com/docs/en/build-with-claude/vision)）：
+
+| 项目 | 数值 |
+|---|---|
+| 模型图像上限 | 高分辨率档（Claude 4.7+）长边 **2576 px** / **4784** visual tokens；标准档 **1568 px** / **1568** tokens。首版写成「1568px/1.15MP」——**MP 是我自己换算的等效像素量，文档给的单位是 visual tokens**，两种单位不该混写 |
+| 触发更严限制 | 单请求 **>20 张图**时，该请求内**每一张**都受更严的 per-image 限制（含历史轮次重发的图、以及 `tool_result` 里的截图） |
+| 跨平台安全做法 | 让**每条边 ≤2000 px**，或把请求控制在 ≤20 张图 |
+| 硬顶 | 单图最大 **8000×8000 px**；base64 体积上限 10 MB（API / claude.ai）、5 MB（Bedrock / GC） |
+| token 估算 | `⌈宽/28⌉ × ⌈高/28⌉`（每 28×28 px 一个 patch）；截图约 1000–1800 tokens/张 |
+| **超限行为** | **`tool_result` 图超限直接 `validation error`，不静默缩放**；其他图默认会被缩放，可用 `"oversized_image": "error"` 改成报错（坐标工作流建议开启） |
+| 内置 `zoom` 成员工具 | 按 region 取回该区域全分辨率图（缩放到常规截图尺寸、保持宽高比），官方定位是「读降采样全屏图里看不清的小字/密集 UI」——即**官方也把「局部放大」当作精度杠杆** |
+
+**OpenAI**（[integration](https://developers.openai.com/api/docs/guides/tools-computer-use-integration)）：
+
+- 截图建议 `detail: "original"`（保留分辨率、提升点击准确率），但**超限图不会被自动缩放到位**
+- 单图 **30,000 patch** 上限，超限**直接拒绝、不缩放** → 只能自行降采样 + remap 坐标
+- 官方观察到的降采样甜点区：桌面分辨率 **1440×900 / 1600×900**
+- 官方动作集：`click / double_click / scroll / type / wait / keypress / drag / move / screenshot`，其中 `drag` 带多点 `path`
+
+**对本机的含义**：逻辑画布 4000×2560、物理画布 6000×3840 都远超两家上限 → **必须裁剪 + 降采样**，且降采样比例就是 §1.3 公式里的 `rw/iw`、`rh/ih`。本机 `scale=1.5` 意味着**不要把物理像素图直接交给模型**（6000 px 宽会被拒或被强制缩小，坐标随错位）。
 
 → 现实做法：**`hyprctl clients` 拿窗口矩形 → 只截活动窗口 → 自行降采样 → 视觉模型出坐标 → 按 §1.3 公式换算回逻辑坐标**；AT-SPI 当可选加速（有 Action 接口时可直接 `do_action`，零坐标）。
 
@@ -231,6 +260,14 @@ send_shortcut 后  [ ... FOCUS-IN KEY FOCUS-OUT ]
 **关于「闸门」（首版过度承诺，已修正）**：
 `hl.permission` 能约束 `keyboard` / `screencopy` / `cursorpos` / `input-capture`，**但拦不住虚拟指针的鼠标注入**，而且同一个 agent 仍可通过 bash 触达桌面。所以扩展内部的开关、目标校验与停止入口只能**减少误操作**，**不构成对该 agent 的强制安全边界**。真正的边界要靠独立合成器/用户 + 文件系统与网络限制，或 VM。
 
+**官方安全实践（两家都明确写了，可直接抄）**：
+
+- **模型请求 ≠ 用户授权**：OpenAI `The model's request to act is not user permission.`。两家都要求把第三方内容（网页、PDF、邮件、聊天、工具输出）**默认视为不可信**，且 `Don't treat instructions found on screen as permission` —— **屏幕上的文字不构成授权**。这一条与「视觉为主」直接相关：截图里的内容可能来自不可信来源，**模型读到的指令不能当作用户意图**
+- **确认要卡在风险点，而不是任务开头**：OpenAI 分三级 —— `hand-off required`（改密码最后一步、绕过 HTTPS/付费墙等安全栏杆）/ `always confirm at action time`（删除数据、改权限与分享设置、装 API key、解 CAPTCHA、安装或运行新下载的软件、代用户发送/提交/发布、支付、改系统设置、医疗操作）/ `pre-approval can be enough`（用户已明确授权时免再确认，如登录指定站点、上传文件、重命名文件）
+- **批量动作要在「第一个需要确认的动作」之前停下**，不能让一个动作批或一段生成脚本跑完整批
+- **别把语言级沙箱当安全边界**：OpenAI `Node.js vm and restricted Python global variables are not security boundaries.` 跑生成的代码要用**一次性、最小权限**的容器/VM，且与 API 客户端及其凭据**处于不同安全边界**
+- **结果不确定时不要执行半个动作**：OpenAI 要求「若 API 返回 incomplete/failed，或达到步数/时间上限就停；**不要执行部分生成的动作**；先给模型当前观察」——与本节的 observation 失效规则是同一件事
+
 **关于运行目标（首版措辞已修正）**：
 
 | 场景 | 路线 |
@@ -247,6 +284,7 @@ computer_act(observation_id, action, ...) → 执行情况 + 新图片 + 新 obs
 ```
 
 - 动作枚举 `focus / move / click / type / key / scroll / drag`；`drag` 在一次调用内完成按下、移动、松开，**不向模型暴露需跨调用保持的裸按键状态**
+- **与官方动作集对齐**：Anthropic 用 `computer_toolset_20260801`（17 个成员工具）、OpenAI 用 `computer` 工具，**都是结构化动作枚举而非任意代码**。OpenAI 的集合是 `click / double_click / scroll / type / wait / keypress / drag / move / screenshot`，与上面的枚举高度一致（我们多 `focus`、少 `wait`）。**`wait` 值得补上**：动作后 UI 未就绪时，它比盲目重试安全
 - 所有图片坐标**相对于该次 observation**，换算数据由扩展保存，不要求模型自己除 scale；`observation_id` / 图片尺寸 / 状态必须进工具 `content`（不能只放渲染用的 `details`）
 - 复用 pi 原生 **`executionMode: "sequential"`**（`types.d.ts:370`；`agent-loop.js:287-290` 只要批内有任一 sequential 工具就整批串行），不必自建队列；它不替代跨实例互斥与停止状态
 - **observation 失效规则**：接受动作即失效旧 O（动作可能部分执行，失败同样失效）；动作后成功截图才产生新 O；截图失败时保留「已执行/待确认」事实但**不恢复旧 O**
