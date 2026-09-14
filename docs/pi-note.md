@@ -69,6 +69,20 @@ pi-note 把 Claude Code 的两个机制移植到 pi：**文件式记忆**（每�
 
 记忆根目录用 `getAgentDir()`（包入口已导出）拼接，不硬编码 `~/.pi/agent`。
 
+#### D4.1：slug 的输入是 git 主 worktree，不是裸 cwd
+
+`git worktree add` 让一个仓库有多个工作目录。若直接用裸 cwd 算 slug，每个 worktree 各得一个记忆目录，同一项目的事实被拆散且互相不可见。因此 `session_start` 先用 `memoryRootFor(cwd)`（`extensions/pi-note/git-root.ts`）把 cwd 归一到仓库根：
+
+```
+git rev-parse --path-format=absolute --git-common-dir
+```
+
+- 结果 basename 为 `.git` 时取 `dirname`：主 worktree 与它所有 linked worktree 共享这一个目录。主 checkout 的 slug 不变（`/repo/.git` → `/repo`），所以既有记忆目录无需迁移。
+- 其余形态（submodule 的 gitdir、`--separate-git-dir`、bare repo）无法安全反推根，返回 cwd 原值，退化为「一个目录一个记忆」，而不是把不相关的项目合并到一起。
+- 任何失败（git 不存在、cwd 不在仓库里、git < 2.31 不认 `--path-format`）同样退化为 cwd，不抛错、不中断 `session_start`。
+
+必须带 `--path-format=absolute`：在子目录里 git 只打印 `.git`，拿它和 cwd 拼接会得到错的路径。
+
 ### D5：scratchpad 每 session 一个目录
 
 sessionId 由 `ctx.sessionManager.getSessionId()` 给出，任何 session（含 `--no-session`）都有，是全局唯一 UUID，不需要 slug 层级和兜底分支。
@@ -76,7 +90,7 @@ sessionId 由 `ctx.sessionManager.getSessionId()` 给出，任何 session（含 
 ## 4. 目录布局
 
 ```
-~/.pi/agent/pi-note/<slug>/          # 记忆目录
+~/.pi/agent/pi-note/<slug>/          # 记忆目录（<slug> 由 git 主 worktree 算出，见 D4.1）
 ├── MEMORY.md                        # 索引，每条记忆一行
 ├── cli-preferences.md
 └── two-clone-workflow.md
@@ -246,6 +260,7 @@ Before saving, check the index for an existing entry that already covers it. Upd
 按 `AGENTS.md` 的测试原则（纯逻辑层单测，mock pi 事件层，临时目录用 `mkdtempSync`）：
 
 - **路径解析**：给定 cwd 和 sessionId，产出的 slug 与 `~/.pi/agent/sessions/` 下的目录名一致，记忆目录 / scratchpad 目录正确
+- **git 根归一**：真仓库 + `git worktree add` 的临时仓库里，worktree 及其子目录都归一到主 checkout，slug 等于主 checkout 的 slug；非仓库目录、相对路径、`..` 路径各自退化正确（`test/git-root.test.ts`）
 - **变量展开**：`$PI_NOTE_SCRATCHPAD_DIR/x` 与 `${PI_NOTE_SCRATCHPAD_DIR}/x` 被展开；`$PI_NOTE_SCRATCHPAD_DIR_BACKUP` 不展开；出现在字符串中间不展开；bash 工具参数不展开；无变量的参数原样返回
 - **规则文本组装**：`<MEMORY_DIR>` 被替换、`$PI_NOTE_SCRATCHPAD_DIR` 保留字面量；快照为空时无索引段；未就绪时返回原 system prompt；快照测试锁死规则文本
 

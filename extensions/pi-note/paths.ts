@@ -2,7 +2,9 @@
 //
 // Two scopes (SPEC §3 D1/D4/D5):
 // - memory is project-level: every session in the same working directory shares
-//   one dir, keyed by the same slug pi uses to name its session dirs.
+//   one dir, keyed by the same slug pi uses to name its session dirs. The caller
+//   passes the *memory root* (git main worktree, see git-root.ts), not the raw
+//   cwd, so all worktrees of one repository land in the same dir.
 // - scratchpad is session-level: one dir per globally-unique session id.
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -24,7 +26,8 @@ export function slugForCwd(cwd: string): string {
 	return `--${resolved.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
 
-/** Project memory dir: <agentDir>/pi-note/<slug>. */
+/** Project memory dir: <agentDir>/pi-note/<slug>. `memoryRoot` is the dir the
+ *  slug is derived from — pass `cwd`, or a git root for worktree sharing. */
 export function memoryDirFor(agentDir: string, cwd: string): string {
 	return join(agentDir, MEMORY_DIR_NAME, slugForCwd(cwd));
 }
@@ -61,14 +64,15 @@ export interface PiNotePaths {
 	scratchDir: string;
 }
 
-/** One call that yields every path the session needs. */
+/** One call that yields every path the session needs. `memoryRoot` is a working
+ *  directory: the cwd, or the git root when the cwd is a linked worktree. */
 export function resolvePaths(
 	agentDir: string,
-	cwd: string,
+	memoryRoot: string,
 	sessionId: string,
 	opts: { tmpDir?: string; uid?: number } = {},
 ): PiNotePaths {
-	const memoryDir = memoryDirFor(agentDir, cwd);
+	const memoryDir = memoryDirFor(agentDir, memoryRoot);
 	return {
 		memoryDir,
 		memoryIndex: join(memoryDir, MEMORY_INDEX_NAME),

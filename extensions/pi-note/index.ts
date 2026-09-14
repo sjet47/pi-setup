@@ -9,6 +9,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { SCRATCH_ENV_VAR, resolvePaths } from "./paths.ts";
+import { memoryRootFor } from "./git-root.ts";
 import { prepareSession } from "./prepare.ts";
 import { buildPromptAppend } from "./prompt.ts";
 import { expandInputStrings } from "./expand.ts";
@@ -24,9 +25,11 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		try {
+			// Key memory on the git root, not the raw cwd: every `git worktree`
+			// of one repository shares the main checkout's memory dir (SPEC §3 D4).
 			const paths = resolvePaths(
 				getAgentDir(),
-				ctx.sessionManager.getCwd(),
+				memoryRootFor(ctx.sessionManager.getCwd()),
 				ctx.sessionManager.getSessionId(),
 			);
 			const prepared = prepareSession(paths.memoryDir, paths.scratchDir);

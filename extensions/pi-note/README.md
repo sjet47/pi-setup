@@ -28,7 +28,10 @@ anything itself.
 ```
 
 - `<slug>` mirrors pi's session-dir naming for the project cwd, e.g.
-  `--home-sjet-repo-pi-setup--`.
+  `--home-sjet-repo-pi-setup--`. The cwd is first normalized to the **git root**
+  (`git rev-parse --git-common-dir`), so every `git worktree` of one repository
+  shares the main checkout's memory dir instead of getting a private one.
+  Outside a repository the cwd is used as-is.
 - `<uid>` is the numeric OS user id, so separate users of one machine never
   collide in the world-writable `/tmp`.
 - `<session-id>` is pi's globally-unique session UUID. `/fork`/`/clone` start a
