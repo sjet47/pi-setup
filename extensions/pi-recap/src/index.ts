@@ -34,8 +34,10 @@ import {
   showWidget,
 } from "./tui.js"
 
-const RECAP_MAX_TOKENS = 160
-const RECAP_REQUEST_TIMEOUT_MS = 4_000
+// The provider budget includes hidden reasoning tokens; visible recap text is
+// still bounded by the prompt and sanitizeRecapText().
+const RECAP_MAX_TOKENS = 2_048
+const RECAP_REQUEST_TIMEOUT_MS = 30_000
 const AWAY_RECAP_DELAY_MS = 5 * 60 * 1_000
 const RECAP_ENTRY_TYPE = "pi-recap:state"
 
@@ -299,11 +301,14 @@ async function generateRecap(
       },
     )
 
-    if (runId !== state.runId || !state.sessionActive) return
+    if (runId !== state.runId || !state.sessionActive || abortController.signal.aborted) return
     if (response.stopReason !== "stop") {
       if (options.manual) {
         clearWidget(ctx)
-        notifyUser(ctx, "Recap generation failed.", "error")
+        const reason = response.stopReason === "length"
+          ? `output token limit reached (${RECAP_MAX_TOKENS} tokens, including reasoning)`
+          : response.errorMessage || `model stopped with ${response.stopReason}`
+        notifyUser(ctx, `Recap generation failed: ${sanitizeRecapText(reason, 240)}`, "error")
       }
       return
     }
@@ -324,10 +329,12 @@ async function generateRecap(
     state.lastRecapCurrent = true
     clearNoModelWarning(ctx)
     showWidget(ctx, recap)
-  } catch {
+  } catch (error) {
+    if (runId !== state.runId || !state.sessionActive || abortController.signal.aborted) return
     if (options.manual) {
       clearWidget(ctx)
-      notifyUser(ctx, "Recap generation failed.", "error")
+      const reason = error instanceof Error ? error.message : String(error)
+      notifyUser(ctx, `Recap generation failed: ${sanitizeRecapText(reason, 240)}`, "error")
     }
     // Automatic recaps are best-effort. Keep the previous recap on transient failures.
   } finally {

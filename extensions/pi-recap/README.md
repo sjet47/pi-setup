@@ -1,6 +1,10 @@
 # pi-recap
 
-Vendored from [`@tifan/pi-recap@0.4.7`](https://www.npmjs.com/package/@tifan/pi-recap/v/0.4.7), upstream commit [`4a1f7ce19080f4a3beaf9c502760f14dccabcd88`](https://github.com/tifandotme/pi-extensions/tree/4a1f7ce19080f4a3beaf9c502760f14dccabcd88/packages/pi-recap). The five files in `src/` are unchanged from that release. Licensed under [MIT](LICENSE); the license text is copied from the upstream repository root because the published package omits its license symlink.
+Vendored from [`@tifan/pi-recap@0.4.7`](https://www.npmjs.com/package/@tifan/pi-recap/v/0.4.7), upstream commit [`4a1f7ce19080f4a3beaf9c502760f14dccabcd88`](https://github.com/tifandotme/pi-extensions/tree/4a1f7ce19080f4a3beaf9c502760f14dccabcd88/packages/pi-recap). Licensed under [MIT](LICENSE); the license text is copied from the upstream repository root because the published package omits its license symlink.
+
+Local fixes: generation allows 2048 output tokens (including hidden reasoning) and a 30-second request timeout. The visible recap remains bounded by the original prompt and 320-character sanitizer. Manual failures show a bounded error reason, and cancelled requests cannot overwrite newer UI state.
+
+Run regression tests with `npm run test:recap` from the repository root.
 
 Re-enter a session without rereading the transcript.
 
