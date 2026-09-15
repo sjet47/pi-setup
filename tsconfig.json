@@ -20,6 +20,7 @@
     "extensions/pi-cache-graph",
     "extensions/pi-footer",
     "extensions/pi-wordle",
-    "extensions/pi-note"
+    "extensions/pi-note",
+    "extensions/pi-recap/src"
   ]
 }

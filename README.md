@@ -33,6 +33,19 @@ pi install git:github.com/sjet47/pi-setup@v0.1.0
 | `pi-footer/` | Show the session name (`/name`) at the right edge of the input box border, Claude Code style | [local] |
 | `pi-wordle/` | Play Wordle: `/wordle` activates the (hidden-by-default) wordle tools & the model plays the daily puzzle, tracking streak/stats | [local] |
 | `pi-note/` | Project-level file memory (`MEMORY.md` index + one file per topic) and a per-session scratchpad dir — Claude Code style, no tools/commands registered | [local] |
+| `pi-recap/` | One-line session recap on demand, on resume, or after five idle minutes; preserves the existing model config | [tifandotme/pi-extensions](https://github.com/tifandotme/pi-extensions/tree/master/packages/pi-recap) |
+
+### Migrating pi-recap
+
+After updating the installed pi-setup clone to a revision containing `extensions/pi-recap/src/index.ts`, remove the standalone package to avoid loading two copies:
+
+```bash
+pi remove npm:@tifan/pi-recap
+```
+
+Then run `/reload`. The existing `$PI_CODING_AGENT_DIR/extensions/pi-recap.json` (by default `~/.pi/agent/extensions/pi-recap.json`) and saved session recaps remain compatible. `/recap`, `/recap status`, `/recap config`, and automatic recap behavior are unchanged. See [pi-recap](extensions/pi-recap/README.md) for details.
+
+### Usage statistics
 
 `pi-stats` stores config and data under `~/.pi/agent/pi-stats/`, using one `stats.sqlite` for skill/tool/TPS stats.
 
