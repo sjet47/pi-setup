@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
-import type { MarkdownTheme } from "@earendil-works/pi-tui";
+import { visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { CHROME_LINES, MemoryBrowserOverlay, overlayHeight } from "../browser.ts";
 import { buildTopics, type MemoryTopic } from "../memory-index.ts";
 
@@ -200,6 +200,46 @@ test("an index line whose file is gone is marked and reports the error", () => {
 	const detail = render();
 	assert.match(detail, /gone\.md — file is missing/);
 	assert.match(detail, /no content|—/);
+});
+
+test("every rendered line is exactly the overlay width, CJK included", () => {
+	// pi composites overlay lines into the frame and truncates anything wider
+	// than the declared width, so an over-long line corrupts the layout. CJK
+	// (double-width) content and long unbreakable words are the usual culprits.
+	const topics = buildTopics(
+		"- [一个特别长的中文记忆标题，用来验证标题截断](long-title.md) — 钩子\n" +
+			"- [CJK](cjk.md) — 因 Hyprland 不支持双 seat，首版明确采用真实桌面单 seat；双 seat 留待后续。\n" +
+			"- [Wide](wide.md) — " + "x".repeat(200) + "\n",
+	);
+	const { overlay, lines } = harness({
+		topics,
+		bodies: {
+			"cjk.md": "# 中文标题\n\n" + "很长的中文段落，用来验证换行。".repeat(8) + "\n\n```ts\nconst aVeryLongIdentifierName = \"x\";\n```\n",
+			"wide.md": "# Wide\n\n" + "y".repeat(500) + "\n",
+		},
+		rows: 24,
+	});
+	const assertWidths = (label: string) => {
+		const rendered = lines();
+		assert.ok(rendered.length > 0, `${label}: nothing rendered`);
+		for (const [index, line] of rendered.entries()) {
+			assert.equal(
+				visibleWidth(line),
+				WIDTH,
+				`${label}: line ${index} is ${visibleWidth(line)} wide, expected ${WIDTH}`,
+			);
+		}
+	};
+	assertWidths("level 1");
+	for (let press = 0; press < 3; press += 1) overlay.handleInput(DOWN);
+	assertWidths("level 1 scrolled");
+	overlay.handleInput(ENTER);
+	assertWidths("level 2");
+	overlay.handleInput(PAGE_DOWN);
+	assertWidths("level 2 scrolled");
+	overlay.handleInput(ESC);
+	for (const char of "中文") overlay.handleInput(char);
+	assertWidths("level 1 filtered");
 });
 
 test("an unreadable file never throws out of render", () => {
