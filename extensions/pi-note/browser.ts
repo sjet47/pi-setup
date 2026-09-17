@@ -27,6 +27,11 @@ import {
 import { topicMatchText, type MemoryTopic } from "./memory-index.ts";
 import { byteLength, formatBytes, type MemoryBody } from "./memory-store.ts";
 
+/** Width of the selection cursor prefix (`› `). */
+const CURSOR_WIDTH = 2;
+/** Keep at least this much room for the title before showing the meta column. */
+const MIN_TITLE_WIDTH = 10;
+
 /** Lines that are never part of the scrolling body: 3 above, 4 below. */
 export const CHROME_LINES = 7;
 const MAX_OVERLAY_HEIGHT = 34;
@@ -57,6 +62,8 @@ export interface MemoryBrowserOptions {
 	label: string;
 	/** Live terminal height, so the overlay follows a resize. */
 	terminalRows: () => number;
+	/** Live clock, so the relative ages are testable and never frozen at open. */
+	now: () => number;
 	theme: Theme;
 	markdownTheme: MarkdownTheme;
 	keybindings: KeybindingsManager;
@@ -327,7 +334,7 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 				body.push(this.sectionLine(row, contentWidth));
 				continue;
 			}
-			body.push(this.topicLine(row.topic, index === this.selectedIndex));
+			body.push(this.topicLine(row.topic, index === this.selectedIndex, contentWidth));
 			if (body.length < bodyHeight && row.topic.hook !== "") {
 				body.push(this.hookLine(row.topic.hook));
 			}
@@ -361,12 +368,34 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		return detail.lines;
 	}
 
-	private topicLine(topic: MemoryTopic, selected: boolean): string {
+	/**
+	 * Title row: cursor + title on the left, `size · age` right-aligned. The meta
+	 * column is dropped on a narrow overlay so the title keeps enough room; a
+	 * missing file takes the column over with a `missing` marker (it has no
+	 * size/age to show).
+	 */
+	private topicLine(topic: MemoryTopic, selected: boolean, contentWidth: number): string {
 		const theme = this.options.theme;
 		const cursor = selected ? theme.fg("accent", "› ") : "  ";
-		const title = selected ? theme.fg("accent", theme.bold(topic.title)) : topic.title;
-		const missing = topic.exists ? "" : theme.fg("warning", " (missing)");
-		return `${cursor}${title}${missing}`;
+		let meta = this.topicMeta(topic);
+		// Narrow overlay: the title wins over the meta column.
+		if (visibleWidth(meta) > contentWidth - CURSOR_WIDTH - MIN_TITLE_WIDTH) meta = "";
+		const metaWidth = visibleWidth(meta);
+		const titleWidth = Math.max(1, contentWidth - CURSOR_WIDTH - metaWidth - (metaWidth > 0 ? 2 : 0));
+		// Truncate before styling: keep the width math free of ANSI nesting.
+		const clipped = truncateToWidth(topic.title, titleWidth, "…");
+		const title = selected ? theme.fg("accent", theme.bold(clipped)) : clipped;
+		const gap = Math.max(1, contentWidth - CURSOR_WIDTH - visibleWidth(title) - metaWidth);
+		return `${cursor}${title}${meta === "" ? "" : " ".repeat(gap) + meta}`;
+	}
+
+	/** Right-hand meta column text, already styled; "" when there is nothing to show. */
+	private topicMeta(topic: MemoryTopic): string {
+		const theme = this.options.theme;
+		if (!topic.exists) return theme.fg("warning", "missing");
+		if (topic.size === undefined || topic.mtimeMs === undefined) return "";
+		const text = `${formatBytes(topic.size)} · ${formatAge(topic.mtimeMs, this.options.now())}`;
+		return theme.fg("dim", text);
 	}
 
 	private hookLine(hook: string): string {
@@ -447,6 +476,26 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		const [left, right] = position === "top" ? ["╭", "╮"] : ["╰", "╯"];
 		return this.options.theme.fg("border", left + "─".repeat(Math.max(0, width - 2)) + right);
 	}
+}
+
+/**
+ * Compact age of a memory: `now` / `5m` / `3h` / `12d` / `8mo` / `2y`. Relative
+ * rather than absolute because the point of the column is spotting a memory
+ * nobody has touched in months — `8mo` reads at a glance, `2025-01-07` does not.
+ * A future mtime (clock skew, restored backup) clamps to `now`.
+ */
+export function formatAge(mtimeMs: number, nowMs: number): string {
+	const elapsed = Math.max(0, nowMs - mtimeMs);
+	const minutes = Math.floor(elapsed / 60_000);
+	if (minutes < 1) return "now";
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h`;
+	const days = Math.floor(hours / 24);
+	if (days < 30) return `${days}d`;
+	const years = Math.floor(days / 365);
+	// 360-364 days is still "12mo": switching to years there would print "0y".
+	return years < 1 ? `${Math.floor(days / 30)}mo` : `${years}y`;
 }
 
 /** Body lines exactly `height` long: extra lines dropped, short ones padded. */

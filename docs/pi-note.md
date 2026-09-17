@@ -124,7 +124,9 @@ sessionId 由 `ctx.sessionManager.getSessionId()` 给出，任何 session（含 
 
 ### F0 — 记忆浏览（`/memory` 命令，按需）
 
-一级：每行一条 topic（`MEMORY.md` 顺序），标题 + 暗色钩子行；输入即模糊过滤（匹配标题 / 文件名 / 钩子）。索引未提到的 `.md` 文件追加在 `unindexed` 分组里——这种文件对未来 session 不可见，得能看见；索引提到但文件不存在的行标 `(missing)`。回车进二级。
+一级：每行一条 topic（`MEMORY.md` 顺序），标题 + 暗色钩子行，右侧为 `大小 · 年龄` 元信息列（如 `623 B · 9mo`）；输入即模糊过滤（匹配标题 / 文件名 / 钩子）。索引未提到的 `.md` 文件追加在 `unindexed` 分组里——这种文件对未来 session 不可见，得能看见；索引提到但文件不存在的行，元信息列位置显示 `missing`（说明索引已过期）。回车进二级。
+
+元信息列的设计意图是「一眼发现长期没维护的记忆」：年龄用相对值（`now` / `5m` / `3h` / `12d` / `8mo` / `2y`）而不是绝对日期，`8mo` 略过一眼就能抓住，`2025-01-07` 要停下来换算。`size` 来自 `statSync`，`mtimeMs` 即最后一次编辑时间。嵌套 target（`sub/x.md`）不取统计信息，该列为空；浮层过窄（留给标题不足 `MIN_TITLE_WIDTH`）时整列让位给标题。
 
 二级：该文件用 markdown 渲染，`↑↓` / `PgUp` / `PgDn` / `Home` / `End` 滚动，页脚显示行区间；ESC 回一级（搜索词保留），一级 ESC 关浮层，`Ctrl+C` 任意层级直接关。
 
@@ -269,7 +271,8 @@ Before saving, check the index for an existing entry that already covers it. Upd
 - [ ] `/fork` 后 `$PI_NOTE_SCRATCHPAD_DIR` 指向与父 session 不同的目录
 - [x] system prompt 里不含任何 `/tmp/` 开头的 pi-note 路径
 - [ ] 正常路径下没有 notify、没有 footer 状态项
-- [x] `/memory` 一级列出索引 topic 与未索引文件；输入字符即时模糊过滤；索引指向缺失文件时标 `(missing)`
+- [x] `/memory` 一级列出索引 topic 与未索引文件；输入字符即时模糊过滤；索引指向缺失文件时元信息列显示 `missing`
+- [x] `/memory` 一级右侧显示 `大小 · 相对年龄`；过窄时该列让位给标题；嵌套 target 与缺失文件不显示统计信息
 - [x] `/memory` 二级 ESC 只回退一级（搜索词保留），一级 ESC 关闭，`Ctrl+C` 任意层级关闭
 - [x] `/memory` 在 session 内新建记忆后立刻可见（每次打开重新读盘，不读快照）
 - [x] `/memory` 任意层级渲染行数恒等于 `overlayHeight(终端行数)`，内容在内部滚动
@@ -283,8 +286,8 @@ Before saving, check the index for an existing entry that already covers it. Upd
 - **变量展开**：`$PI_NOTE_SCRATCHPAD_DIR/x` 与 `${PI_NOTE_SCRATCHPAD_DIR}/x` 被展开；`$PI_NOTE_SCRATCHPAD_DIR_BACKUP` 不展开；出现在字符串中间不展开；bash 工具参数不展开；无变量的参数原样返回
 - **规则文本组装**：`<MEMORY_DIR>` 被替换、`$PI_NOTE_SCRATCHPAD_DIR` 保留字面量；快照为空时无索引段；未就绪时返回原 system prompt；快照测试锁死规则文本
 - **索引解析**（`test/memory-index.test.ts`）：各种列表写法的解析、去重、外部链接忽略、`.md` 之外的未索引文件不列、缺失文件标记、嵌套 target 不误报
-- **读盘**（`test/memory-store.test.ts`）：临时目录下 `MEMORY.md` + 磁盘文件的合并；目录/索引缺失不抛；`..`、绝对路径被拒
-- **浮层**（`test/browser.test.ts`）：桩 theme/keybindings 驱动，断言渲染行数恒等于 `overlayHeight`、搜索过滤、回车开二级、ESC 分层、缺失文件错误态、滚动到底 clamp、超窄宽度不抛
+- **读盘**（`test/memory-store.test.ts`）：临时目录下 `MEMORY.md` + 磁盘文件的合并；目录/索引缺失不抛；`..`、绝对路径被拒；`listMemoryFiles` 的 size/mtime、跳过目录、跟随符号链接、断链不计入（从而读作 missing）
+- **浮层**（`test/browser.test.ts`）：桩 theme/keybindings/时钟驱动，断言渲染行数恒等于 `overlayHeight`、每行宽度恒等于面板宽度（含 CJK 与元信息列）、搜索过滤、回车开二级、ESC 分层、缺失文件错误态、滚动到底 clamp、超窄宽度不抛、元信息列的显示与让位边界、`formatAge` 各档位（含 360-364 天必须是 `12mo` 而非 `0y`、时钟偏移到未来不得出现负年龄）
 
 ## 11. 落地清单
 

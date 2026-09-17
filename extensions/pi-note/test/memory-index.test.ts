@@ -3,7 +3,19 @@
 // Run: cd extensions/pi-note && node --import tsx --test test/*.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildTopics, normalizeLink, parseIndex, stripHook, topicMatchText } from "../memory-index.ts";
+import {
+	buildTopics,
+	normalizeLink,
+	parseIndex,
+	stripHook,
+	topicMatchText,
+	type MemoryFileInfo,
+} from "../memory-index.ts";
+
+/** Listing entry; size/mtime default to 0 because most tests do not care. */
+function file(name: string, size = 0, mtimeMs = 0): MemoryFileInfo {
+	return { name, size, mtimeMs };
+}
 
 test("parseIndex reads title, file and hook from index lines", () => {
 	const topics = parseIndex(
@@ -72,7 +84,7 @@ test("stripHook removes only the leading separator", () => {
 test("buildTopics appends unindexed files after the index, sorted by name", () => {
 	const topics = buildTopics(
 		"- [Indexed](indexed.md) — hook\n",
-		["MEMORY.md", "indexed.md", "z-orphan.md", "a-orphan.md", "notes.txt"],
+		[file("MEMORY.md"), file("indexed.md"), file("z-orphan.md"), file("a-orphan.md"), file("notes.txt")],
 	);
 	assert.deepEqual(topics.map((topic) => topic.file), [
 		"indexed.md",
@@ -88,7 +100,7 @@ test("buildTopics appends unindexed files after the index, sorted by name", () =
 });
 
 test("buildTopics marks index lines whose file is gone as missing", () => {
-	const topics = buildTopics("- [Gone](gone.md) — hook\n- [Kept](kept.md) — hook\n", ["kept.md"]);
+	const topics = buildTopics("- [Gone](gone.md) — hook\n- [Kept](kept.md) — hook\n", [file("kept.md")]);
 	assert.deepEqual(topics.map((topic) => [topic.file, topic.exists]), [
 		["gone.md", false],
 		["kept.md", true],
@@ -96,7 +108,7 @@ test("buildTopics marks index lines whose file is gone as missing", () => {
 });
 
 test("buildTopics assumes nested targets and unknown listings exist", () => {
-	const nested = buildTopics("- [Nested](sub/n.md) — hook\n", ["MEMORY.md"]);
+	const nested = buildTopics("- [Nested](sub/n.md) — hook\n", [file("MEMORY.md")]);
 	assert.equal(nested[0].exists, true);
 	const unknown = buildTopics("- [Any](any.md) — hook\n");
 	assert.equal(unknown[0].exists, true);

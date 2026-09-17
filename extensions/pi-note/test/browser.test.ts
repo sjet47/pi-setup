@@ -6,8 +6,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { CHROME_LINES, MemoryBrowserOverlay, overlayHeight } from "../browser.ts";
-import { buildTopics, type MemoryTopic } from "../memory-index.ts";
+import { CHROME_LINES, MemoryBrowserOverlay, formatAge, overlayHeight } from "../browser.ts";
+import { buildTopics, type MemoryFileInfo, type MemoryTopic } from "../memory-index.ts";
 
 const ESC = "\x1b";
 const ENTER = "\r";
@@ -15,6 +15,14 @@ const DOWN = "\x1b[B";
 const PAGE_DOWN = "\x1b[6~";
 const WIDTH = 78;
 const ROWS = 40;
+/** Fixed clock so the right-hand age column is deterministic. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NOW = 1_760_000_000_000;
+
+/** Listing entry with stats; `age` is how long ago the file was modified. */
+function file(name: string, size = 100, ageMs = DAY_MS): MemoryFileInfo {
+	return { name, size, mtimeMs: NOW - ageMs };
+}
 
 const identity = (text: string) => text;
 const theme = {
@@ -55,6 +63,7 @@ function harness(options: {
 		topics: options.topics,
 		label: "home/sjet/repo/pi-setup",
 		terminalRows: () => options.rows ?? ROWS,
+		now: () => NOW,
 		theme,
 		markdownTheme,
 		keybindings,
@@ -77,7 +86,7 @@ function harness(options: {
 function sampleTopics(): MemoryTopic[] {
 	return buildTopics(
 		"- [Alpha](alpha.md) — first memory\n- [Beta](beta.md) — second memory\n",
-		["MEMORY.md", "alpha.md", "beta.md", "orphan.md"],
+		[file("MEMORY.md", 50), file("alpha.md", 2048), file("beta.md", 900, 400 * DAY_MS), file("orphan.md", 12, 3 * DAY_MS)],
 	);
 }
 
@@ -193,9 +202,9 @@ test("detail scrolling follows the file and clamps at the end", () => {
 
 test("an index line whose file is gone is marked and reports the error", () => {
 	const { overlay, render } = harness({
-		topics: buildTopics("- [Gone](gone.md) — hook\n", ["MEMORY.md"]),
+		topics: buildTopics("- [Gone](gone.md) — hook\n", [file("MEMORY.md", 50)]),
 	});
-	assert.match(render(), /Gone \(missing\)/);
+	assert.match(render(), /Gone\s+missing/);
 	overlay.handleInput(ENTER);
 	const detail = render();
 	assert.match(detail, /gone\.md — file is missing/);
@@ -207,9 +216,18 @@ test("every rendered line is exactly the overlay width, CJK included", () => {
 	// than the declared width, so an over-long line corrupts the layout. CJK
 	// (double-width) content and long unbreakable words are the usual culprits.
 	const topics = buildTopics(
-		"- [一个特别长的中文记忆标题，用来验证标题截断](long-title.md) — 钩子\n" +
+		"- [" + "很长的中文标题".repeat(12) + "](long-title.md) — 钩子\n" +
 			"- [CJK](cjk.md) — 因 Hyprland 不支持双 seat，首版明确采用真实桌面单 seat；双 seat 留待后续。\n" +
-			"- [Wide](wide.md) — " + "x".repeat(200) + "\n",
+			"- [Wide](wide.md) — " + "x".repeat(200) + "\n" +
+			"- [Gone](gone.md) — 索引指向不存在的文件\n" +
+			"- [Nested](sub/n.md) — 嵌套目标没有统计信息\n",
+		// Every meta-column shape: wide size + long age, tiny size + "now",
+		// missing (no stats) and a nested target (no stats either).
+		[
+			file("long-title.md", 1536, 3 * DAY_MS),
+			file("cjk.md", 3_500_000, 400 * DAY_MS),
+			file("wide.md", 12, 0),
+		],
 	);
 	const { overlay, lines } = harness({
 		topics,
@@ -231,6 +249,11 @@ test("every rendered line is exactly the overlay width, CJK included", () => {
 		}
 	};
 	assertWidths("level 1");
+	// Guard against the invariant silently degenerating: without stats there is
+	// no meta column at all, which is what this test is most likely to miss.
+	assert.match(lines().join("\n"), /1\.5 KB · 3d/);
+	assert.match(lines().join("\n"), /12 B · now/);
+	assert.match(lines().join("\n"), /missing/);
 	for (let press = 0; press < 3; press += 1) overlay.handleInput(DOWN);
 	assertWidths("level 1 scrolled");
 	overlay.handleInput(ENTER);
@@ -240,6 +263,72 @@ test("every rendered line is exactly the overlay width, CJK included", () => {
 	overlay.handleInput(ESC);
 	for (const char of "中文") overlay.handleInput(char);
 	assertWidths("level 1 filtered");
+});
+
+test("level 1 shows the file size and age right-aligned on the title row", () => {
+	const { render } = harness({
+		topics: buildTopics(
+			"- [Alpha](alpha.md) — first memory\n- [Beta](beta.md) — second memory\n",
+			[file("alpha.md", 1536, 3 * DAY_MS), file("beta.md", 12, 400 * DAY_MS)],
+		),
+	});
+	const rows = render().split("\n").filter((line) => line.includes("B ·"));
+	assert.equal(rows.length, 2);
+	assert.match(rows[0], /Alpha +1\.5 KB · 3d *│$/);
+	assert.match(rows[1], /Beta +12 B · 1y *│$/);
+	// The age column is right-aligned against the panel edge on every wide row.
+	for (const row of rows) assert.ok(row.endsWith("│"), row);
+});
+
+test("a missing file takes the meta column over with `missing`", () => {
+	const { render } = harness({
+		topics: buildTopics("- [Gone](gone.md) — hook\n- [Kept](kept.md) — hook\n", [file("kept.md", 100)]),
+	});
+	const [gone, kept] = render().split("\n").filter((line) => /Gone|Kept/.test(line));
+	assert.match(gone, /Gone +missing *│$/);
+	assert.doesNotMatch(gone, /B ·/);
+	assert.match(kept, /Kept +100 B · 1d *│$/);
+});
+
+test("a topic with no stats (nested target) renders without a meta column", () => {
+	const { render } = harness({
+		topics: buildTopics("- [Nested](sub/n.md) — hook\n", [file("other.md", 100)]),
+	});
+	const row = render().split("\n").find((line) => line.includes("Nested"));
+	assert.ok(row);
+	assert.doesNotMatch(row, /B ·|missing/);
+});
+
+test("a narrow overlay drops the meta column instead of crushing the title", () => {
+	const topics = buildTopics("- [Alpha](alpha.md) — hook\n", [file("alpha.md", 1536, 3 * DAY_MS)]);
+	const wide = harness({ topics, rows: ROWS }).overlay.render(78)[3];
+	assert.match(wide, /1\.5 KB · 3d/);
+	// "1.5 KB · 3d" is 11 cols; it survives while the title keeps >= 10 cols,
+	// i.e. contentWidth >= 23, i.e. width >= 25.
+	const atBoundary = harness({ topics, rows: ROWS }).overlay.render(26)[3];
+	assert.match(atBoundary, /1\.5 KB · 3d/);
+	const narrow = harness({ topics, rows: ROWS }).overlay.render(24)[3];
+	assert.doesNotMatch(narrow, /KB/);
+	assert.match(narrow, /Alpha/);
+});
+
+test("formatAge brackets minutes, hours, days, months and years", () => {
+	const at = (ms: number) => formatAge(NOW - ms, NOW);
+	assert.equal(at(0), "now");
+	assert.equal(at(59_000), "now");
+	assert.equal(at(60_000), "1m");
+	assert.equal(at(59 * 60_000), "59m");
+	assert.equal(at(60 * 60_000), "1h");
+	assert.equal(at(23 * 60 * 60_000), "23h");
+	assert.equal(at(DAY_MS), "1d");
+	assert.equal(at(29 * DAY_MS), "29d");
+	assert.equal(at(30 * DAY_MS), "1mo");
+	assert.equal(at(360 * DAY_MS), "12mo");
+	assert.equal(at(364 * DAY_MS), "12mo");
+	assert.equal(at(365 * DAY_MS), "1y");
+	assert.equal(at(900 * DAY_MS), "2y");
+	// A clock skewed into the future never renders a negative age.
+	assert.equal(formatAge(NOW + 10 * DAY_MS, NOW), "now");
 });
 
 test("an unreadable file never throws out of render", () => {

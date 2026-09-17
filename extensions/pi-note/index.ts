@@ -93,6 +93,7 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 						topics,
 						label,
 						terminalRows: () => tui.terminal.rows,
+						now: () => Date.now(),
 						theme,
 						markdownTheme: getMarkdownTheme(),
 						keybindings,

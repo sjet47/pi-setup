@@ -8,6 +8,21 @@
 // invisible to every future session and showing it is the only way to notice.
 import { MEMORY_INDEX_NAME } from "./paths.ts";
 
+/**
+ * One entry of the memory dir listing: the file's name plus the two numbers the
+ * browser shows in the right-hand meta column. Produced by memory-store.ts
+ * (which owns fs) and consumed here, so the pure layer stays fs-free while
+ * still deciding which entries count as memories.
+ */
+export interface MemoryFileInfo {
+	/** File name, relative to the memory dir. */
+	name: string;
+	/** Bytes on disk. */
+	size: number;
+	/** Last modification time (epoch ms) — the "last maintained" signal. */
+	mtimeMs: number;
+}
+
 export interface MemoryTopic {
 	/** Link text from MEMORY.md; the file name for an unindexed file. */
 	title: string;
@@ -19,6 +34,10 @@ export interface MemoryTopic {
 	indexed: boolean;
 	/** false when the index points at a file that is not on disk. */
 	exists: boolean;
+	/** Bytes on disk; undefined when the file is missing or the listing is unavailable. */
+	size?: number;
+	/** Last modification time; undefined together with `size`. */
+	mtimeMs?: number;
 }
 
 /** `- [Title](file.md) — hook`; bullet or numbered list item. */
@@ -81,33 +100,41 @@ export function parseIndex(indexText: string): MemoryTopic[] {
  * Topic rows for the browser: index entries (order preserved) followed by
  * memory files the index does not mention, sorted by name.
  *
- * `fileNames` is a flat listing of the memory dir; pass undefined when the
- * listing is unavailable, in which case nothing is marked missing. Only
- * names without a separator are checked against the listing — a nested
- * `sub/x.md` target is assumed fine rather than reported missing.
+ * `files` is the memory dir listing; pass undefined when it is unavailable, in
+ * which case nothing is marked missing and no sizes/ages are shown. Only plain
+ * names are looked up in the listing — a nested `sub/x.md` target is assumed
+ * fine rather than reported missing, and gets no stats either.
  */
-export function buildTopics(indexText: string, fileNames?: string[]): MemoryTopic[] {
+export function buildTopics(indexText: string, files?: MemoryFileInfo[]): MemoryTopic[] {
 	const indexed = parseIndex(indexText);
-	const listed = fileNames === undefined ? undefined : new Set(fileNames);
+	const listed =
+		files === undefined ? undefined : new Map(files.map((entry) => [entry.name, entry]));
 	for (const topic of indexed) {
 		if (listed === undefined || topic.file.includes("/")) continue;
-		topic.exists = listed.has(topic.file);
+		const info = listed.get(topic.file);
+		topic.exists = info !== undefined;
+		if (info !== undefined) {
+			topic.size = info.size;
+			topic.mtimeMs = info.mtimeMs;
+		}
 	}
 	const indexedFiles = new Set(indexed.map((topic) => topic.file));
-	const orphans = (fileNames ?? [])
+	const orphans = (files ?? [])
 		.filter(
-			(name) =>
-				name.toLowerCase().endsWith(".md") &&
-				name !== MEMORY_INDEX_NAME &&
-				!indexedFiles.has(name),
+			(entry) =>
+				entry.name.toLowerCase().endsWith(".md") &&
+				entry.name !== MEMORY_INDEX_NAME &&
+				!indexedFiles.has(entry.name),
 		)
-		.sort((a, b) => a.localeCompare(b))
-		.map<MemoryTopic>((name) => ({
-			title: name,
-			file: name,
+		.sort((a, b) => a.name.localeCompare(b.name))
+		.map<MemoryTopic>((entry) => ({
+			title: entry.name,
+			file: entry.name,
 			hook: "",
 			indexed: false,
 			exists: true,
+			size: entry.size,
+			mtimeMs: entry.mtimeMs,
 		}));
 	return [...indexed, ...orphans];
 }

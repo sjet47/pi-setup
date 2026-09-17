@@ -24,14 +24,15 @@ every invocation, so memories written after `session_start` show up immediately
 
 ```
 ╭──────────────────────────────────────────────────────────────────╮
-│ Memory · ~/repo/pi-setup                          2 topics       │
+│ Memory · ~/repo/pi-setup                          3 topics       │
 │ ──────────────────────────────────────────────────────────────── │
-│ › Computer use 路线决策                                           │
+│ › Computer use 路线决策                          623 B · now      │
 │     因 Hyprland 不支持双 seat，首版明确采用真实桌面单 seat。      │
-│   插件管理分工                                                    │
+│   插件管理分工                                    688 B · 9mo     │
 │     settings.json 已负责多机同步；pi-setup 收编小插件源码。       │
+│   Deleted                                         missing        │
 │ ── unindexed (1) ──────────────────────────────────────────────  │
-│   draft-notes.md                                                  │
+│   draft-notes.md                                  12 B · 1mo     │
 │ ──────────────────────────────────────────────────────────────── │
 │ Search: draft                                                     │
 │ ↑↓ navigate · Enter open · Esc close                              │
@@ -40,9 +41,14 @@ every invocation, so memories written after `session_start` show up immediately
 
 - **Level 1** — one row per `MEMORY.md` line (title as link text, hook as the
   dim second line), fuzzy-filtered over title, file name and hook as you type.
-  Memory files that no index line points at are listed under `unindexed`, and
-  index lines whose file is gone are flagged `(missing)` — an unindexed memory
-  is invisible to every future session, so it is worth seeing.
+  Memory files that no index line points at are listed under `unindexed` — such
+  a file is invisible to every future session, so it is worth seeing.
+- **Right-hand column** — `size · age` (e.g. `623 B · 9mo`), so a memory nobody
+  has touched in months stands out. The age is relative on purpose: `9mo` reads
+  at a glance where a date does not. A file the index points at but that is not
+  on disk shows `missing` in its place (the index is stale); a nested `sub/x.md`
+  target shows nothing (no stats), and such a row must be opened to learn why.
+  The column is dropped on a narrow overlay so the title keeps its room.
 - **Level 2** — `Enter` opens the linked file rendered as markdown,
   scrollable with `↑↓` / `PgUp` / `PgDn` / `Home` / `End` and a line counter in
   the footer.

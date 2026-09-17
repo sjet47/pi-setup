@@ -1,10 +1,40 @@
 // Filesystem side of the `/memory` browser. Read-only: the plugin still never
 // writes memories itself (SPEC §2) — the overlay only shows what is on disk,
 // read fresh on every open so it is never stale against the session snapshot.
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { MEMORY_INDEX_NAME } from "./paths.ts";
-import { buildTopics, type MemoryTopic } from "./memory-index.ts";
+import { buildTopics, type MemoryFileInfo, type MemoryTopic } from "./memory-index.ts";
+
+/**
+ * Every regular file in the memory dir, with the size and mtime the browser
+ * shows. Returns undefined when the dir cannot be listed (nothing is then
+ * reported missing).
+ *
+ * `statSync` (not `lstatSync`) deliberately follows symlinks, so a memory that
+ * is a symlink to a real file counts as present; a broken symlink or a file
+ * that vanishes mid-walk is skipped, which reads as "missing" downstream — the
+ * accurate answer for a line you cannot open. Subdirectories are not walked.
+ */
+export function listMemoryFiles(memoryDir: string): MemoryFileInfo[] | undefined {
+	let names: string[];
+	try {
+		names = readdirSync(memoryDir);
+	} catch {
+		return undefined;
+	}
+	const files: MemoryFileInfo[] = [];
+	for (const name of names) {
+		try {
+			const info = statSync(join(memoryDir, name));
+			if (!info.isFile()) continue;
+			files.push({ name, size: info.size, mtimeMs: info.mtimeMs });
+		} catch {
+			// Vanished or unreadable: leave it out rather than invent stats.
+		}
+	}
+	return files;
+}
 
 /** Read the memory dir into topic rows. Never throws; missing dir = no topics. */
 export function loadTopics(memoryDir: string): MemoryTopic[] {
@@ -15,13 +45,7 @@ export function loadTopics(memoryDir: string): MemoryTopic[] {
 		// No MEMORY.md yet: every file in the dir becomes an orphan row.
 		indexText = "";
 	}
-	let fileNames: string[] | undefined;
-	try {
-		fileNames = readdirSync(memoryDir);
-	} catch {
-		fileNames = undefined;
-	}
-	return buildTopics(indexText, fileNames);
+	return buildTopics(indexText, listMemoryFiles(memoryDir));
 }
 
 export type MemoryBody =
