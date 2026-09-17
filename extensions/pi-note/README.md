@@ -3,8 +3,8 @@
 Project-level **file-based memory** + a per-session **scratchpad dir** for pi,
 ported from Claude Code's two mechanisms. Full behavioral spec: `../../docs/pi-note.md`.
 
-Three hooks, **no registered tools or commands** — nothing appears in the UI
-unless memory init fails (one error notify).
+Three hooks and one **read-only** command — nothing appears in the UI unless you
+run `/memory` or memory init fails (one error notify).
 
 | Hook | What it does |
 |---|---|
@@ -15,6 +15,40 @@ unless memory init fails (one error notify).
 The agent reads and writes memories itself with its built-in `read`/`write`/
 `edit`/`bash` tools; the plugin never parses memory files and never maintains
 anything itself.
+
+## `/memory` — browse this project's memories
+
+A two-level overlay over the memory dir (`browser.ts`). It reads from disk on
+every invocation, so memories written after `session_start` show up immediately
+— unlike the frozen snapshot injected into the system prompt.
+
+```
+╭──────────────────────────────────────────────────────────────────╮
+│ Memory · ~/repo/pi-setup                          2 topics       │
+│ ──────────────────────────────────────────────────────────────── │
+│ › Computer use 路线决策                                           │
+│     因 Hyprland 不支持双 seat，首版明确采用真实桌面单 seat。      │
+│   插件管理分工                                                    │
+│     settings.json 已负责多机同步；pi-setup 收编小插件源码。       │
+│ ── unindexed (1) ──────────────────────────────────────────────  │
+│   draft-notes.md                                                  │
+│ ──────────────────────────────────────────────────────────────── │
+│ Search: draft                                                     │
+│ ↑↓ navigate · Enter open · Esc close                              │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+- **Level 1** — one row per `MEMORY.md` line (title as link text, hook as the
+  dim second line), fuzzy-filtered over title, file name and hook as you type.
+  Memory files that no index line points at are listed under `unindexed`, and
+  index lines whose file is gone are flagged `(missing)` — an unindexed memory
+  is invisible to every future session, so it is worth seeing.
+- **Level 2** — `Enter` opens the linked file rendered as markdown,
+  scrollable with `↑↓` / `PgUp` / `PgDn` / `Home` / `End` and a line counter in
+  the footer.
+- **Keys** — `Esc` closes the list, but only steps back a level from the detail
+  view (the search query survives); `Ctrl+C` closes from either level.
+- The overlay is read-only by design: editing a memory is the agent's job.
 
 ## Directory layout
 
@@ -39,8 +73,8 @@ anything itself.
 - The scratchpad lives under `/tmp` (tmpfs here, auto-cleaned after 10 days by
   systemd `tmpfiles.d`) — no expiry handling is built in.
 
-The memory dir is only ever created by `session_start`; there is no command to
-list or manage memories. Memories are plain markdown files.
+The memory dir is only ever created by `session_start`. Memories are plain
+markdown files; `/memory` browses them, nothing else manages them.
 
 ## Moving the memory dir (symlink)
 

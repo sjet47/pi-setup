@@ -6,8 +6,8 @@
 //   passes the *memory root* (git main worktree, see git-root.ts), not the raw
 //   cwd, so all worktrees of one repository land in the same dir.
 // - scratchpad is session-level: one dir per globally-unique session id.
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve, sep } from "node:path";
 
 export const MEMORY_DIR_NAME = "pi-note";
 export const MEMORY_INDEX_NAME = "MEMORY.md";
@@ -24,6 +24,20 @@ export const SCRATCH_ENV_VAR = "PI_NOTE_SCRATCHPAD_DIR";
 export function slugForCwd(cwd: string): string {
 	const resolved = resolve(cwd);
 	return `--${resolved.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+}
+
+/**
+ * Short label for a memory root, used as the `/memory` browser header:
+ * `/home/sjet/repo/pi-setup` -> `~/repo/pi-setup`. Deliberately derived from
+ * the real path, not from the slug — the slug is lossy, so reversing it would
+ * turn `pi-setup` into `pi/setup`.
+ */
+export function memoryRootLabel(memoryRoot: string, home: string = homedir()): string {
+	const resolved = resolve(memoryRoot);
+	if (home === "") return resolved;
+	const root = resolve(home);
+	if (resolved === root) return "~";
+	return resolved.startsWith(root + sep) ? `~${resolved.slice(root.length)}` : resolved;
 }
 
 /** Project memory dir: <agentDir>/pi-note/<slug>. `memoryRoot` is the dir the

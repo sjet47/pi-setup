@@ -11,6 +11,7 @@ import {
 	scratchpadDirFor,
 	scratchpadRoot,
 	slugForCwd,
+	memoryRootLabel,
 } from "../paths.ts";
 
 const SESSION_ID = "11111111-2222-4333-8444-555555555555";
@@ -67,4 +68,12 @@ test("same cwd + different session ids share memory but not scratchpads", () => 
 	});
 	assert.equal(a.memoryDir, b.memoryDir); // project-level memory: shared
 	assert.notEqual(a.scratchDir, b.scratchDir); // session-level scratchpad: separate
+});
+
+test("memoryRootLabel shortens the home prefix and nothing else", () => {
+	assert.equal(memoryRootLabel("/home/sjet/repo/pi-setup", "/home/sjet"), "~/repo/pi-setup");
+	assert.equal(memoryRootLabel("/home/sjet", "/home/sjet"), "~");
+	assert.equal(memoryRootLabel("/srv/work", "/home/sjet"), "/srv/work");
+	assert.equal(memoryRootLabel("/home/sjeter/x", "/home/sjet"), "/home/sjeter/x");
+	assert.equal(memoryRootLabel("/home/sjet/repo/pi-setup", ""), "/home/sjet/repo/pi-setup");
 });

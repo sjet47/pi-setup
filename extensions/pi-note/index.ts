@@ -1,18 +1,24 @@
 // pi-note — persistent file-based memory (project-level) + per-session
 // scratchpad for pi. Port of Claude Code's two mechanisms (docs/pi-note.md).
 //
-// Three hooks, no registered tools or commands (SPEC §2):
+// Three hooks, no registered tools (SPEC §2):
 //   session_start        create dirs, export PI_NOTE_SCRATCHPAD_DIR, snapshot MEMORY.md
 //   before_agent_start   append rules text + index snapshot to the system prompt
 //   tool_call            expand the scratchpad var in non-shell tool arguments
 // Memory reads/writes are left entirely to the agent's own read/write/edit tools.
+//
+// One read-only command: `/memory` opens the browser overlay over the topics in
+// MEMORY.md (browser.ts). It reads from disk on every invocation, so it shows
+// memories written after session_start, and it never writes anything.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { SCRATCH_ENV_VAR, resolvePaths } from "./paths.ts";
+import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { SCRATCH_ENV_VAR, memoryRootLabel, resolvePaths } from "./paths.ts";
 import { memoryRootFor } from "./git-root.ts";
 import { prepareSession } from "./prepare.ts";
 import { buildPromptAppend } from "./prompt.ts";
 import { expandInputStrings } from "./expand.ts";
+import { loadTopics, readTopicBody } from "./memory-store.ts";
+import { MemoryBrowserOverlay } from "./browser.ts";
 
 export default function piNoteExtension(pi: ExtensionAPI) {
 	// Per-session state. session_start fires on startup/new/resume/fork/reload
@@ -20,6 +26,7 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 	// re-initialized from disk on every one of those transitions.
 	let ready = false;
 	let memoryDir = "";
+	let memoryRoot = "";
 	let scratchDir = "";
 	let snapshot = "";
 
@@ -27,13 +34,11 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 		try {
 			// Key memory on the git root, not the raw cwd: every `git worktree`
 			// of one repository shares the main checkout's memory dir (SPEC §3 D4).
-			const paths = resolvePaths(
-				getAgentDir(),
-				memoryRootFor(ctx.sessionManager.getCwd()),
-				ctx.sessionManager.getSessionId(),
-			);
+			const root = memoryRootFor(ctx.sessionManager.getCwd());
+			const paths = resolvePaths(getAgentDir(), root, ctx.sessionManager.getSessionId());
 			const prepared = prepareSession(paths.memoryDir, paths.scratchDir);
 			memoryDir = paths.memoryDir;
+			memoryRoot = root;
 			scratchDir = paths.scratchDir;
 			snapshot = prepared.snapshot;
 			// D1: scratchpad goes through the environment. bash resolves
@@ -47,6 +52,7 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 			// only way to stop the later hooks from acting.
 			ready = false;
 			memoryDir = "";
+			memoryRoot = "";
 			scratchDir = "";
 			snapshot = "";
 			delete process.env[SCRATCH_ENV_VAR]; // never leave a stale path behind
@@ -64,6 +70,56 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 		// block is byte-identical for the whole session (snapshot is frozen at
 		// session_start), preserving pi's prompt-prefix caching.
 		return { systemPrompt: event.systemPrompt + buildPromptAppend(memoryDir, snapshot) };
+	});
+
+	pi.registerCommand("memory", {
+		description: "Browse this project's memories (MEMORY.md topics)",
+		handler: async (_args, ctx) => {
+			if (!ready || memoryDir === "") {
+				ctx.ui.notify("pi-note is not initialized in this session — nothing to browse.", "warning");
+				return;
+			}
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("The memory browser needs the interactive TUI.", "warning");
+				return;
+			}
+			// Read fresh: the overlay is the authoritative on-disk view, unlike the
+			// frozen session_start snapshot injected into the system prompt.
+			const topics = loadTopics(memoryDir);
+			const label = memoryRootLabel(memoryRoot);
+			await ctx.ui.custom<void>(
+				(tui, theme, keybindings, done) => {
+					const overlay = new MemoryBrowserOverlay({
+						topics,
+						label,
+						terminalRows: () => tui.terminal.rows,
+						theme,
+						markdownTheme: getMarkdownTheme(),
+						keybindings,
+						readBody: (topic) => readTopicBody(memoryDir, topic.file),
+						onDone: () => done(undefined),
+					});
+					return {
+						get focused() {
+							return overlay.focused;
+						},
+						set focused(value: boolean) {
+							overlay.focused = value;
+						},
+						render: (width: number) => overlay.render(width),
+						invalidate: () => overlay.invalidate(),
+						handleInput: (data: string) => {
+							overlay.handleInput(data);
+							tui.requestRender();
+						},
+					};
+				},
+				{
+					overlay: true,
+					overlayOptions: { anchor: "center", width: "80%", minWidth: 56, margin: 1 },
+				},
+			);
+		},
 	});
 
 	pi.on("tool_call", (event) => {

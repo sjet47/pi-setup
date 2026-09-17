@@ -24,15 +24,16 @@ pi-note 把 Claude Code 的两个机制移植到 pi：**文件式记忆**（每�
 
 ## 2. 插件职责
 
-三个钩子，**不注册任何工具或命令**：
+三个钩子 + 一个**只读**命令，**不注册任何工具**：
 
-| 钩子 | 做什么 |
+| 钩子 / 命令 | 做什么 |
 |---|---|
 | `session_start` | 建目录；设 `process.env.PI_NOTE_SCRATCHPAD_DIR`；读一次 `MEMORY.md` 存为快照 |
 | `before_agent_start` | 把规则文本 + 索引快照追加到 `event.systemPrompt` |
 | `tool_call` | 非 shell 工具参数里的 `$PI_NOTE_SCRATCHPAD_DIR` 前缀替换为真实路径 |
+| `/memory` | 打开两层浮层浏览本项目记忆：一级列 `MEMORY.md` 的 topic（标题 + 钩子，支持模糊搜索），回车进二级看该文件（markdown 渲染、可滚动），ESC 回退一级 |
 
-记忆的增删改查全部由 agent 用自带的 read/write/edit/bash 工具完成。插件不解析记忆文件、不维护索引、不做去重。
+记忆的增删改查全部由 agent 用自带的 read/write/edit/bash 工具完成。插件不解析记忆文件、不维护索引、不做去重。`/memory` 是唯一的例外：它**只读**，每次调用都从磁盘重新读取（不受 D2 的快照限制），从不写文件。
 
 ## 3. 关键设计决策
 
@@ -120,6 +121,14 @@ sessionId 由 `ctx.sessionManager.getSessionId()` 给出，任何 session（含 
 ```
 
 ## 6. 功能需求
+
+### F0 — 记忆浏览（`/memory` 命令，按需）
+
+一级：每行一条 topic（`MEMORY.md` 顺序），标题 + 暗色钩子行；输入即模糊过滤（匹配标题 / 文件名 / 钩子）。索引未提到的 `.md` 文件追加在 `unindexed` 分组里——这种文件对未来 session 不可见，得能看见；索引提到但文件不存在的行标 `(missing)`。回车进二级。
+
+二级：该文件用 markdown 渲染，`↑↓` / `PgUp` / `PgDn` / `Home` / `End` 滚动，页脚显示行区间；ESC 回一级（搜索词保留），一级 ESC 关浮层，`Ctrl+C` 任意层级直接关。
+
+浮层自身高度固定（按终端行数算出，内容在内部滚动）：pi 的 overlay 是**从顶部截断**到 `maxHeight`，`ScrollView` 也只在布局系统驱动下才滚动，所以组件自己算高度、自己切片。每次打开重新读盘，session 内新建的记忆立刻可见。
 
 ### F1 — 目录准备（`session_start`，所有 reason）
 
@@ -235,7 +244,13 @@ Before saving, check the index for an existing entry that already covers it. Upd
 **When** session 开始
 **Then** 一条 error notify；system prompt 不含任何 pi-note 文本，`$PI_NOTE_SCRATCHPAD_DIR` 不展开；session 其余功能不受影响。
 
-### US-10：临时内容不进记忆
+### US-10：快速查看已有记忆
+
+**Given** 用户想看一眼这个项目记了哪些东西
+**When** 输入 `/memory`
+**Then** 浮层一级列出索引里的 topic（标题 + 钩子）；输入字符即模糊过滤；回车进二级看该文件全文（markdown 渲染、可滚动）；ESC 回一级（搜索词保留），再 ESC 关闭。索引未提到的 `.md` 文件列在 `unindexed` 分组里。
+
+### US-11：临时内容不进记忆
 
 **Given** agent 手头有中间结果、草稿、一次性脚本、日志这类内容
 **When** 它想把这些落盘
@@ -254,6 +269,10 @@ Before saving, check the index for an existing entry that already covers it. Upd
 - [ ] `/fork` 后 `$PI_NOTE_SCRATCHPAD_DIR` 指向与父 session 不同的目录
 - [x] system prompt 里不含任何 `/tmp/` 开头的 pi-note 路径
 - [ ] 正常路径下没有 notify、没有 footer 状态项
+- [x] `/memory` 一级列出索引 topic 与未索引文件；输入字符即时模糊过滤；索引指向缺失文件时标 `(missing)`
+- [x] `/memory` 二级 ESC 只回退一级（搜索词保留），一级 ESC 关闭，`Ctrl+C` 任意层级关闭
+- [x] `/memory` 在 session 内新建记忆后立刻可见（每次打开重新读盘，不读快照）
+- [x] `/memory` 任意层级渲染行数恒等于 `overlayHeight(终端行数)`，内容在内部滚动
 
 ## 10. 测试要点
 
@@ -263,6 +282,9 @@ Before saving, check the index for an existing entry that already covers it. Upd
 - **git 根归一**：真仓库 + `git worktree add` 的临时仓库里，worktree 及其子目录都归一到主 checkout，slug 等于主 checkout 的 slug；非仓库目录、相对路径、`..` 路径各自退化正确（`test/git-root.test.ts`）
 - **变量展开**：`$PI_NOTE_SCRATCHPAD_DIR/x` 与 `${PI_NOTE_SCRATCHPAD_DIR}/x` 被展开；`$PI_NOTE_SCRATCHPAD_DIR_BACKUP` 不展开；出现在字符串中间不展开；bash 工具参数不展开；无变量的参数原样返回
 - **规则文本组装**：`<MEMORY_DIR>` 被替换、`$PI_NOTE_SCRATCHPAD_DIR` 保留字面量；快照为空时无索引段；未就绪时返回原 system prompt；快照测试锁死规则文本
+- **索引解析**（`test/memory-index.test.ts`）：各种列表写法的解析、去重、外部链接忽略、`.md` 之外的未索引文件不列、缺失文件标记、嵌套 target 不误报
+- **读盘**（`test/memory-store.test.ts`）：临时目录下 `MEMORY.md` + 磁盘文件的合并；目录/索引缺失不抛；`..`、绝对路径被拒
+- **浮层**（`test/browser.test.ts`）：桩 theme/keybindings 驱动，断言渲染行数恒等于 `overlayHeight`、搜索过滤、回车开二级、ESC 分层、缺失文件错误态、滚动到底 clamp、超窄宽度不抛
 
 ## 11. 落地清单
 
@@ -275,3 +297,6 @@ Before saving, check the index for an existing entry that already covers it. Upd
 - [x] `extensions/pi-note/README.md`：目录布局、如何 symlink 搬迁记忆目录
 - [x] `npm run typecheck` 通过、测试通过
 - [x] 按双 clone 流程同步到 `~/.pi/agent/git/.../pi-setup` 后 `/reload` 实测（2026-09-08 通过：env 正确、0700、write 工具变量展开落盘、无 /tmp 路径泄漏）
+- [x] `/memory` 源码（`memory-index.ts` / `memory-store.ts` / `browser.ts`）+ 三个测试文件
+- [x] README（插件级 `/memory` 章节 + 顶层插件表格）
+- [ ] 同步运行时 clone 后 `/reload`，真机实测 `/memory`（浮层显示、模糊搜索、ESC 分层、真 markdown 主题下的换行与截断）
