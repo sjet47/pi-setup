@@ -95,7 +95,7 @@ EOF
 
 ### 状态栏设计模式
 
-参考 pi-fast-mode 的实践：
+开关型功能的状态栏呈现（以「开启但当前不适用」为例）：
 
 | 状态 | 显示 | 颜色 | 含义 |
 |------|------|------|------|
@@ -244,18 +244,3 @@ node --test tests/*.test.ts
 - 优先测 store/纯逻辑层，mock pi 事件层
 - store/DB 测试用 `mkdtempSync` 创建临时目录，测试完清理
 - WebSocket/进程级测试（如 pi-intercom）用独立的 broker startup 测试
-
-## Fast Mode 设计模式（参考实现）
-
-pi-fast-mode 的核心设计是一个 **FEATURES 表**：
-
-```typescript
-const DEFAULT_RULES = [
-  { api: "openai-",     injectionKey: "service_tier", injectionValue: "priority" },
-  { api: "anthropic-",  injectionKey: "speed",        injectionValue: "fast" },
-];
-```
-
-匹配逻辑：`model.api.startsWith(rule.api)`，自动决定注入什么参数。这样新增 provider 时只需加一条规则，不用改 config 文件。
-
-参考实现：[aliaksei-raketski/pi-packages/packages/fast-mode](https://github.com/aliaksei-raketski/pi-packages/tree/main/packages/fast-mode)

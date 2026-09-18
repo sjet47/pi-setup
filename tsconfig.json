@@ -12,7 +12,6 @@
     "extensions/pi-shots",
     "extensions/pi-stats/src",
     "extensions/pi-execution-time",
-    "extensions/pi-fast-mode",
     "extensions/pi-search-prompts",
     "extensions/pi-inline-skill",
     "extensions/pi-wakatime/src",
