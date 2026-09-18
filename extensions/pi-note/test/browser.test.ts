@@ -52,10 +52,27 @@ const markdownTheme = {
 } as MarkdownTheme;
 const keybindings = { matches: () => false } as unknown as KeybindingsManager;
 
+/**
+ * A theme that tags each color with a distinct SGR code, so a test can assert
+ * *which* color a cell got. The identity stub above cannot: it erases color.
+ * The codes are ANSI, so `visibleWidth` still ignores them.
+ */
+const COLOR_CODE: Record<string, number> = { border: 36, borderMuted: 90 };
+const taggingTheme = {
+	...theme,
+	fg: (color: string, text: string) => `\u001b[${COLOR_CODE[color] ?? 32}m${text}\u001b[0m`,
+} as unknown as Theme;
+
+/** SGR code of the first cell of every rendered row. */
+function frameCodes(lines: string[]): string[] {
+	return lines.map((line) => /^\u001b\[(\d+)m/.exec(line)?.[1] ?? "none");
+}
+
 function harness(options: {
 	topics: MemoryTopic[];
 	bodies?: Record<string, string>;
 	rows?: number;
+	theme?: Theme;
 }) {
 	const bodies = options.bodies ?? {};
 	let closed = 0;
@@ -64,7 +81,7 @@ function harness(options: {
 		label: "home/sjet/repo/pi-setup",
 		terminalRows: () => options.rows ?? ROWS,
 		now: () => NOW,
-		theme,
+		theme: options.theme ?? theme,
 		markdownTheme,
 		keybindings,
 		readBody: (topic) =>
@@ -329,6 +346,29 @@ test("formatAge brackets minutes, hours, days, months and years", () => {
 	assert.equal(at(900 * DAY_MS), "2y");
 	// A clock skewed into the future never renders a negative age.
 	assert.equal(formatAge(NOW + 10 * DAY_MS, NOW), "now");
+});
+
+test("the frame keeps one color on every row, separators included", () => {
+	// Regression: the separator rows used to paint their own frame cells with
+	// borderMuted, so the vertical border showed a dark notch wherever a
+	// separator crossed it.
+	const tagged = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "# Alpha\n\nBODY\n" },
+		theme: taggingTheme,
+	});
+	const list = frameCodes(tagged.lines());
+	assert.deepEqual([...new Set(list)], ["36"], `frame color varies per row: ${list.join(",")}`);
+
+	tagged.overlay.handleInput(ENTER);
+	const detail = frameCodes(tagged.lines());
+	assert.deepEqual([...new Set(detail)], ["36"], `frame color varies per row: ${detail.join(",")}`);
+
+	// The muted dashes are still muted: the fix must not flatten everything to
+	// one color.
+	const separatorRow = tagged.lines().find((line) => line.includes("─") && line.includes("│"));
+	assert.ok(separatorRow);
+	assert.match(separatorRow, /\u001b\[90m─+/);
 });
 
 test("an unreadable file never throws out of render", () => {

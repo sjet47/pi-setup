@@ -468,8 +468,13 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		return this.options.theme.fg("border", "│") + clipped + padding + this.options.theme.fg("border", "│");
 	}
 
+	/**
+	 * Horizontal rule between the header/footer and the body. Only the dashes are
+	 * muted: the two frame cells must come from `line()`, or the vertical border
+	 * gets a dark notch at every separator row (it did, colored borderMuted).
+	 */
 	private separator(contentWidth: number): string {
-		return this.options.theme.fg("borderMuted", `│${"─".repeat(contentWidth)}│`);
+		return this.line(this.options.theme.fg("borderMuted", "─".repeat(contentWidth)), contentWidth);
 	}
 
 	private border(position: "top" | "bottom", width: number): string {
