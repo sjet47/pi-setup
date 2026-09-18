@@ -415,13 +415,13 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		if (this.level === "detail" && this.detail) {
 			const detail = this.detail;
 			const right = detail.body.ok
-				? `${detailTotal} lines · ${formatBytes(detail.bytes)}`
+				? `${plural(detailTotal, "line")} · ${formatBytes(detail.bytes)}`
 				: detail.body.error;
 			return titlePair(theme.fg("accent", theme.bold(detail.topic.title)), theme.fg("dim", right), contentWidth);
 		}
 		const orphans = this.options.topics.filter((topic) => !topic.indexed).length;
 		const counts = [
-			`${this.options.topics.length - orphans} topics`,
+			plural(this.options.topics.length - orphans, "topic"),
 			orphans > 0 ? `${orphans} unindexed` : "",
 		].filter(Boolean).join(" · ");
 		return titlePair(
@@ -450,7 +450,7 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 
 	private matchSummary(): string {
 		const query = this.searchInput.getValue().trim();
-		if (query === "") return `${this.options.topics.length} topics`;
+		if (query === "") return plural(this.options.topics.length, "topic");
 		const matches = this.rows().filter((row) => row.kind === "topic").length;
 		return `${matches}/${this.options.topics.length} matches`;
 	}
@@ -501,6 +501,11 @@ export function formatAge(mtimeMs: number, nowMs: number): string {
 	const years = Math.floor(days / 365);
 	// 360-364 days is still "12mo": switching to years there would print "0y".
 	return years < 1 ? `${Math.floor(days / 30)}mo` : `${years}y`;
+}
+
+/** `1 topic` / `2 topics` — 0 takes the plural form. */
+function plural(count: number, word: string): string {
+	return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
 /** Body lines exactly `height` long: extra lines dropped, short ones padded. */

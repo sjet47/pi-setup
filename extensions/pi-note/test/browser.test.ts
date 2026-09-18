@@ -151,6 +151,23 @@ test("typing filters topics by title, file and hook", () => {
 	assert.match(render(), /Alpha/);
 });
 
+test("counts are pluralized: `1 topic` and `1 line`, not `1 topics` / `1 lines`", () => {
+	const one = harness({
+		topics: buildTopics("- [Only](only.md) — hook\n", [file("only.md", 40)]),
+		bodies: { "only.md": "# Only\n" },
+	});
+	assert.match(one.render(), /1 topic *│/);
+	assert.doesNotMatch(one.render(), /1 topics/);
+
+	one.overlay.handleInput(ENTER);
+	// The detail header counts rendered lines and the body's bytes, not the file's.
+	assert.match(one.render(), /1 line · 7 B/);
+	assert.doesNotMatch(one.render(), /1 lines/);
+
+	assert.match(harness({ topics: sampleTopics() }).render(), /3 topics/);
+	assert.match(harness({ topics: [] }).render(), /0 topics/); // 0 takes the plural
+});
+
 test("a query with no match shows the empty message", () => {
 	const { overlay, render } = harness({ topics: sampleTopics() });
 	for (const char of "zzz") overlay.handleInput(char);
