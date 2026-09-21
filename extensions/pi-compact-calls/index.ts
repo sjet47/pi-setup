@@ -608,6 +608,9 @@ class RowComponent implements Component {
  * - `foldThinking` only absorbs a run that is followed by a tool call of ours
  *   that actually joined a block, so replayed history (no blocks), non-built-in
  *   tools and messages with visible prose keep their native rows;
+ * - folding is skipped while thinking is set to *visible* (the component's
+ *   `hideThinkingBlock` is false): then the rows carry the full text and there is
+ *   no pile-up of one-line labels to fix;
  * - a throw inside the fold falls back to the untouched message;
  * - a missing export (future pi) leaves the extension fully working, just with
  *   native thinking rows.
@@ -617,10 +620,14 @@ function installThinkingFold(): void {
 	const proto = component?.prototype;
 	if (!proto || typeof proto.updateContent !== "function" || proto.piCompactCallsThinkingFold) return;
 	const native = proto.updateContent as (message: any, isStreaming?: boolean) => void;
-	proto.updateContent = function (this: unknown, message: any, isStreaming?: boolean) {
+	proto.updateContent = function (this: any, message: any, isStreaming?: boolean) {
 		let rendered = message;
 		try {
-			rendered = foldThinkingOfMessage(message) ?? message;
+			// Fold only while thinking renders as a label: with thinking set to visible
+			// the user is reading the full text, and a five-line preview in the block
+			// would be a downgrade. `hideThinkingBlock` is a private field of this very
+			// component; anything unreadable keeps native rendering (no fold).
+			if (this?.hideThinkingBlock === true) rendered = foldThinkingOfMessage(message) ?? message;
 		} catch {
 			rendered = message;
 		}

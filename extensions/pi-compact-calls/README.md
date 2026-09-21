@@ -61,7 +61,7 @@
 | 失败行的错误末行 | 输出的最后一个非空行；bash 的 `Command exited with code N` 没有信息量，取它的上一行并追加 `(exit N)`，同时去掉 `/bin/bash: line 1: ` 前缀；无输出时只显示 `exit N` |
 | 中断（Esc） | 没执行的调用不会显示 `✓`：pi 给出 `Operation aborted` 结果的显示 `✗`，没有任何结果的保持 `○` |
 | 恢复历史会话 / `/tree` / `/reload` 重放 | 重放的工具行没有实时事件，无法分块，退化成单行紧凑行（`✓ edit: poem.txt +2 −0`）；有结果所以是 `✓`/`✗` 而不是 `○` |
-| thinking | **折进块**：pi 每条 assistant 消息渲染一个隐藏的 `Thinking...` 行，多步思考的轮次会堆成一串。只吸收「后面跟着一个真正折进块的工具调用」的那些 thinking run（`format.ts` 的 `foldThinking`），文本存在那个工具行上；**折叠态不计数**，`Ctrl+O` 展开后以 dim 斜体渲染在该工具行上方（前 5 行 + `… N more lines`）。重放历史 / 非内置工具 / 带可见正文的消息保留原生行 |
+| thinking | **折进块**：pi 每条 assistant 消息渲染一个隐藏的 `Thinking...` 行，多步思考的轮次会堆成一串。只吸收「后面跟着一个真正折进块的工具调用」的那些 thinking run（`format.ts` 的 `foldThinking`），文本存在那个工具行上；**折叠态不计数**，`Ctrl+O` 展开后以 dim 斜体渲染在该工具行上方（前 5 行 + `… N more lines`）。重放历史 / 非内置工具 / 带可见正文的消息保留原生行；thinking 设为 visible（`app.thinking.toggle`）时完全不吸收 |
 
 ### 为什么跨消息合并、只在正文处断开
 
@@ -97,6 +97,7 @@ pi 没有 per-message 钩子：`registerMessageRenderer` 只对 `type: "custom"`
    - 只要消息里有可见正文 → 一个都不算我们的（正文已经封口，那块不属于这里）；
    - 一个 run 必须**紧跟着一个已折进块的工具调用**（`entries.get(id)?.group`）才被吸收，排在后面的尾部 run 留在原位；
    - 非内置工具（subagent/MCP）、重放历史（没有实时事件 ⇒ 没有块）都吸不了，标签照旧。
+3. 包裹体还有一个前置条件：`this.hideThinkingBlock === true`（read 不到则不吸收）。thinking 设成 visible 时那一行承载的是**全文**，吸进块里只剩 5 行预览反而是降级，而且那种模式下也没有“一堆相同单行标签”的问题。
 3. 被吸收的文本按「归属给哪个 toolCallId」存到对应的 `ToolEntry.thinking`（`THINKING_TEXT_LIMIT=8000`，保留头部，行数另存），不另外维护状态。
 4. 展开态（`Ctrl+O`）在工具行**上方**渲染它：`thinkingText` 色 + 斜体（同 pi 原生 thinking 文本的配色）、`EXPANDED_RESULT_LINES` 行 + `… N more lines`、lead 与该行结果的预览一致（`│   ` / 四空格）。折叠态什么都不加。
 
@@ -191,3 +192,10 @@ tmux 实机（`pi -ne -e extensions/pi-compact-calls/index.ts`，110 列；排�
 - 带可见正文的消息里的 thinking 保留原生标签（纯函数单测覆盖，未单独实机复跑）✓
 
 注意：流式阶段 `Thinking...` 会先出现再被吸走 —— 工具行是消息更新之后的 `renderCall` 里建的，最晚到 `message_end` 吸收。
+
+补充验证（门控 + 展开态，2026-09-21）：
+
+- **门控可读性**（确定性验证，不依赖模型是否产出 thinking）：把 `index.ts` 临时复制成扩展目录内的 `fold-dbg.ts`，在包裹体里 `appendFileSync` 打 `this.hideThinkingBlock` 与每个 toolCallId 的 `folded` 结果，跑一小段会话后看日志：`{"hide":true,…}`（真实运行下门控为 true）、`…:true`（行建好后 id 即在块内）；首帧出现过一次 `…:false`，与「行是在消息更新之后的 renderCall 里建的」一致。副本放在扩展目录内是必需的（`./format.ts` 相对导入），验证后删除，不入库。
+- **吸收（端到端）**：排查 `deploy.sh` 场景，工具消息 `['thinking','toolCall']`（1004 字符 thinking）→ 折叠态只有 `✓ 4 tool calls (2 read, 1 bash, 1 ls) · 0.1s` + `└ ✓ ls: app`，**无 `Thinking...`、无多余空行**；最终回答那条消息（thinking + 正文）保留原生 `Thinking...` 行 ✓
+- **展开态**：`Ctrl+O` 后吸收的 thinking 带 `│   ` rail 渲染在第一个工具行上方，5 行 + `… 10 more lines` ✓
+- **门控为 false 时不吸收**（thinking visible）：仅由代码路径保证（门控在进入 fold 前返回），未实机切换 thinking 验证。
