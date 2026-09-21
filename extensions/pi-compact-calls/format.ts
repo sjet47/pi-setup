@@ -5,7 +5,16 @@
  * `node --test` (see tests/).
  */
 
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "os";
+
+/** Theme access, injected so the helpers stay testable without a pi theme. */
+export type Paint = {
+	fg(color: string, text: string): string;
+	bold(text: string): string;
+};
+
+export const PLAIN_PAINT: Paint = { fg: (_color, text) => text, bold: (text) => text };
 
 /** Argument summary length. */
 export const SUMMARY_MAX_CHARS = 60;
@@ -175,4 +184,80 @@ export function selectPreview(text: string, max: number, mode: PreviewMode, tota
 	const all = text.split("\n");
 	const lines = mode === "tail" ? all.slice(-max) : all.slice(0, max);
 	return { lines, hidden: Math.max(totalLines, all.length) - lines.length, mode };
+}
+
+export type Interval = { start: number; end?: number };
+
+/**
+ * Total time covered by the union of the intervals: overlapping (parallel) calls
+ * count once, gaps (the model generating the next call) do not count at all. An
+ * interval without an end is still running and counts up to `now`.
+ */
+export function unionDuration(intervals: readonly Interval[], now: number): number {
+	const spans = intervals
+		.map((interval) => ({ start: interval.start, end: Math.max(interval.start, interval.end ?? now) }))
+		.sort((a, b) => a.start - b.start);
+	let total = 0;
+	let coveredUntil = Number.NEGATIVE_INFINITY;
+	for (const span of spans) {
+		if (span.end <= coveredUntil) continue;
+		total += span.end - Math.max(span.start, coveredUntil);
+		coveredUntil = span.end;
+	}
+	return total;
+}
+
+/**
+ * - running:    some call is executing.
+ * - idle:       nothing executing, block still open — the model is producing the
+ *               next call, so the outcome is not settled yet.
+ * - ok / failed / incomplete: closed block; incomplete = some call never ran.
+ */
+export type HeaderState = "running" | "idle" | "ok" | "failed" | "incomplete";
+
+export function headerState(tools: readonly ToolView[], closed: boolean): HeaderState {
+	if (tools.some((tool) => tool.pending)) return "running";
+	if (!closed) return "idle";
+	if (tools.some((tool) => toolState(tool) === "failed")) return "failed";
+	if (tools.some((tool) => toolState(tool) !== "ok")) return "incomplete";
+	return "ok";
+}
+
+const HEADER_COLORS: Record<HeaderState, string> = {
+	running: "accent",
+	idle: "muted",
+	ok: "success",
+	failed: "error",
+	incomplete: "muted",
+};
+
+export type HeaderParts = {
+	state: HeaderState;
+	icon: string;
+	count: number;
+	failed: number;
+	durationMs: number;
+};
+
+/**
+ * Compose the block header for `width` columns. When it does not fit, optional
+ * parts are dropped lowest priority first; the priority (high → low) is
+ * count > failed > duration.
+ */
+export function composeHeader(parts: HeaderParts, width: number, paint: Paint = PLAIN_PAINT): string {
+	const color = HEADER_COLORS[parts.state];
+	const sep = ` ${paint.fg("muted", "·")} `;
+	const head = `${paint.fg(color, parts.icon)} ${paint.fg(color, paint.bold(`${parts.count} tool calls`))}`;
+	// Display order; `drop` is the order in which parts are given up (0 first).
+	const optional: { text: string; drop: number }[] = [];
+	if (parts.failed > 0) optional.push({ text: sep + paint.fg("error", `${parts.failed} failed`), drop: 1 });
+	optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 0 });
+
+	let kept = optional;
+	for (;;) {
+		const line = head + kept.map((part) => part.text).join("");
+		if (visibleWidth(line) <= width || kept.length === 0) return line;
+		const lowest = Math.min(...kept.map((part) => part.drop));
+		kept = kept.filter((part) => part.drop !== lowest);
+	}
 }

@@ -59,16 +59,20 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import {
 	captureText,
+	composeHeader,
 	countLines,
 	type DiffStat,
 	diffStat,
 	errorTail,
 	formatDuration,
+	headerState,
+	type Paint,
 	pickCollapsedTool,
 	previewModeOf,
 	selectPreview,
 	summaryOf,
 	toolState,
+	unionDuration,
 } from "./format.ts";
 
 // =============================================================================
@@ -87,6 +91,8 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 /** One leading space, matching tool rows rendered in pi's default shell (Box paddingX = 1). */
 /** A call that has neither started nor produced a result (args streaming, waiting, or never ran). */
 const QUEUED_ICON = "○";
+/** Open block with nothing executing: the model is generating the next call. Static on purpose — no timer runs for it. */
+const IDLE_ICON = "⠿";
 const INDENT = " ";
 const SUB_INDENT = "    ";
 const RAIL_MID = "├ ";
@@ -139,9 +145,6 @@ type ToolEntry = {
 };
 
 type ToolGroup = {
-	seq: number;
-	startedAt: number;
-	endedAt?: number;
 	/** Ctrl+O state, driven by the leader row. */
 	expanded: boolean;
 	closed: boolean;
@@ -150,7 +153,6 @@ type ToolGroup = {
 
 const entries = new Map<string, ToolEntry>();
 let currentGroup: ToolGroup | null = null;
-let groupSeq = 0;
 /**
  * True between agent_start and agent_end. While live, a row that shows up in
  * renderCall (its args are still streaming) joins the open group right away, so
@@ -173,8 +175,6 @@ function resetState(): void {
 
 function openGroup(): ToolGroup {
 	const group: ToolGroup = {
-		seq: ++groupSeq,
-		startedAt: Date.now(),
 		expanded: false,
 		closed: false,
 		tools: [],
@@ -348,6 +348,8 @@ function bold(text: string): string {
 	return currentTheme ? currentTheme.bold(text) : text;
 }
 
+const paint: Paint = { fg, bold };
+
 /** `+N −M` for an edit, `N lines` for a write; empty for everything else. */
 function statOf(entry: ToolEntry): string {
 	if (entry.name === "edit" && entry.diffStat) {
@@ -417,30 +419,47 @@ function resultPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
 	return rows;
 }
 
-function groupEndedAt(group: ToolGroup): number | undefined {
-	let end: number | undefined;
-	for (const tool of group.tools) {
-		if (tool.endedAt !== undefined && (end === undefined || tool.endedAt > end)) end = tool.endedAt;
+function headerIcon(state: ReturnType<typeof headerState>, now: number): string {
+	switch (state) {
+		case "running":
+			return spinnerFrame(now);
+		case "idle":
+			return IDLE_ICON;
+		case "ok":
+			return "✓";
+		case "failed":
+			return "✗";
+		case "incomplete":
+			return QUEUED_ICON;
 	}
-	return end;
 }
 
 function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const now = Date.now();
-	const pending = group.tools.some((tool) => tool.pending);
-	const failedCount = group.tools.filter((tool) => toolState(tool) === "failed").length;
-	const failed = failedCount > 0;
-	const icon = pending ? spinnerFrame(now) : failed ? "✗" : "✓";
-	const headColor = pending ? "accent" : failed ? "error" : "success";
-	const endedAt = pending ? now : (groupEndedAt(group) ?? now);
+	const state = headerState(group.tools, group.closed);
 	const contentWidth = Math.max(1, width - INDENT.length);
 
 	// A single tool needs no header: the tool line already carries state, summary
 	// and duration. Only batches show the “N tool calls · total” summary.
 	const lines: string[] = [];
 	if (group.tools.length > 1) {
+		// Pure tool time: the union of the execution intervals, so parallel calls do
+		// not double count and the model's thinking time between calls is left out.
+		const intervals = group.tools
+			.filter((tool) => tool.startedAt !== undefined)
+			.map((tool) => ({ start: tool.startedAt!, end: tool.endedAt }));
 		lines.push(
-			`${fg(headColor, icon)} ${fg(headColor, bold(`${group.tools.length} tool calls`))}${failed ? ` ${fg("muted", "·")} ${fg("error", `${failedCount} failed`)}` : ""} ${fg("muted", `· ${formatDuration(endedAt - group.startedAt)}`)}`,
+			composeHeader(
+				{
+					state,
+					icon: headerIcon(state, now),
+					count: group.tools.length,
+					failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
+					durationMs: unionDuration(intervals, now),
+				},
+				contentWidth,
+				paint,
+			),
 		);
 	}
 
@@ -458,7 +477,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 		lines.push(`${fg("dim", "… ")}${fg("muted", `${hiddenCount} more call${hiddenCount === 1 ? "" : "s"}`)} ${fg("dim", "(Ctrl+O to expand)")}`);
 	}
 
-	if (pending) ensureAnimation();
+	if (state === "running") ensureAnimation();
 	return lines.map((line) => INDENT + truncateToWidth(line, contentWidth, "…"));
 }
 
