@@ -8,13 +8,14 @@ import { foldThinking, type ContentItem } from "../format.ts";
  *
  * pi renders one hidden `Thinking...` row per assistant message, so a turn that
  * thinks between calls (one message per step) stacks identical rows beside the
- * folded block. Only a run that is followed by a tool call of ours that joined a
- * block may be absorbed — everything else (visible prose, non-built-in tools,
- * replayed history, trailing runs) keeps rendering natively.
+ * folded block. A run is absorbed when a call that ends up in a block follows it in
+ * the same message — prose in between does not matter (prose and block are the same
+ * step). A trailing run, or one in front of a call of ours that is not folded
+ * (non-built-in tool), keeps rendering natively.
  */
 
 const thinking = (text: string): ContentItem => ({ type: "thinking", thinking: text });
-const toolCall = (id: string): ContentItem => ({ type: "toolCall", id, name: "bash", arguments: {} });
+const toolCall = (id: string, name = "bash"): ContentItem => ({ type: "toolCall", id, name, arguments: {} });
 const text = (value: string): ContentItem => ({ type: "text", text: value });
 
 const none = () => false;
@@ -35,12 +36,18 @@ test("foldThinking: absorbs the run in front of a folded call", () => {
 	assert.equal(folded.content[0], content[1]);
 });
 
-test("foldThinking: keeps the run when a visible text block precedes it", () => {
-	// The prose sealed the block, so this run is not ours to take.
-	assert.equal(foldThinking([text("先说明一下"), thinking("再想"), toolCall("t1")], all), undefined);
-	assert.equal(foldThinking([thinking("想"), text("说明"), toolCall("t1")], all), undefined);
-	// Whitespace-only text does not count as visible content.
+test("foldThinking: a run in front of a folded call is absorbed even with prose around it", () => {
+	assert.ok(foldThinking([text("先说明一下"), thinking("再想"), toolCall("t1")], all));
+	assert.ok(foldThinking([thinking("想"), text("说明"), toolCall("t1")], all));
 	assert.ok(foldThinking([text("  \n "), thinking("想"), toolCall("t1")], all));
+	// The prose stays where it was: only the run (and the row it would have painted) goes away.
+	const folded = foldThinking([thinking("想"), text("说明"), toolCall("t1")], all)!;
+	assert.deepEqual(folded.content.map((item) => item.type), ["text", "toolCall"]);
+});
+
+test("foldThinking: a foreign call in between keeps the run", () => {
+	// The run's text belongs above the row that renders natively, not below it.
+	assert.equal(foldThinking([thinking("想"), toolCall("x", "TaskList"), toolCall("t1")], only("t1")), undefined);
 });
 
 test("foldThinking: keeps the run in front of a call that is not folded", () => {

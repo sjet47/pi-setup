@@ -96,21 +96,23 @@ export type ThinkingFold = {
 };
 
 /**
- * Absorb the thinking that belongs to tool calls already folded into a block.
+ * Absorb the thinking that belongs to tool calls folded into a block.
  *
  * pi renders one *hidden* `Thinking...` row per assistant message, so a turn that
  * thinks between calls stacks identical rows beside the block; once the row
  * itself renders empty the component's own `Spacer(1)` is left behind as a
  * stray blank line. Thinking belongs to the step that produced the call, so it
- * moves into the block instead of keeping its own row.
+ * moves into the block instead of keeping its own row — also when the message has
+ * prose, since the prose and the block belong to the same step.
  *
- * Only a run that is *followed* by a folded call is absorbed:
+ * Only a run that is followed, later in the same message, by a folded call is
+ * absorbed:
  *
- * - a message with visible prose keeps its thinking row — that prose sealed the
- *   block, so the run is not ours to take;
- * - a trailing run with no folded call after it stays visible;
- * - a run before a call that isn't folded (non-built-in tool, replayed history)
- *   stays visible, which keeps replayed sessions rendering natively.
+ * - a trailing run with no folded call after it stays visible (what the model
+ *   thought before answering keeps its row);
+ * - a run in front of a call that isn't folded (non-built-in tool) stays visible,
+ *   even when a folded call comes after that one: its text belongs above the row
+ *   that renders natively.
  *
  * Returns undefined when there is nothing to absorb, so callers can skip the
  * message copy entirely.
@@ -119,33 +121,38 @@ export function foldThinking(
 	content: readonly ContentItem[],
 	isFolded: (toolCallId: string) => boolean,
 ): ThinkingFold | undefined {
-	if (content.some((item) => item?.type === "text" && String(item.text ?? "").trim())) return undefined;
 	const result: ContentItem[] = [];
 	const attributions: { toolCallId: string; text: string }[] = [];
 	let pending: ContentItem[] = [];
+	const flush = () => {
+		if (pending.length > 0) result.push(...pending);
+		pending = [];
+	};
 	for (const item of content) {
 		if (item?.type === "thinking") {
 			pending.push(item);
 			continue;
 		}
-		const toolCallId = item?.type === "toolCall" ? String(item.id ?? "") : "";
-		if (pending.length > 0 && toolCallId && isFolded(toolCallId)) {
-			const text = pending
-				.map((run) => String(run.thinking ?? "").trim())
-				.filter((run) => run.length > 0)
-				.join("\n\n");
-			if (text) attributions.push({ toolCallId, text });
-			pending = [];
+		if (item?.type === "toolCall") {
+			const toolCallId = String(item.id ?? "");
+			if (toolCallId && isFolded(toolCallId)) {
+				const text = pending
+					.map((run) => String(run.thinking ?? "").trim())
+					.filter((run) => run.length > 0)
+					.join("\n\n");
+				if (text) attributions.push({ toolCallId, text });
+				pending = [];
+			} else {
+				flush();
+			}
 			result.push(item);
 			continue;
 		}
-		if (pending.length > 0) {
-			result.push(...pending);
-			pending = [];
-		}
+		// Prose (and anything else) stays where it is; the run keeps looking ahead for a
+		// call of ours to belong to, since prose and block are the same step.
 		result.push(item);
 	}
-	if (pending.length > 0) result.push(...pending);
+	flush();
 	return attributions.length > 0 ? { content: result, attributions } : undefined;
 }
 

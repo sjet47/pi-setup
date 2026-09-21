@@ -70,7 +70,7 @@
 | 失败行的错误末行 | 输出的最后一个非空行；bash 的 `Command exited with code N` 没有信息量，取它的上一行并追加 `(exit N)`，同时去掉 `/bin/bash: line 1: ` 前缀；无输出时只显示 `exit N` |
 | 中断（Esc） | 没执行的调用不会显示 `✓`：pi 给出 `Operation aborted` 结果的显示 `✗`，没有任何结果的保持 `○` |
 | 恢复历史会话 / `/tree` / `/reload` / 压缩后重放 | **也折叠**：重放行没有实时事件，分组由**会话消息离线算出**（`format.ts` 的 `replayGroups`，规则与 live 一致），所以历史批次同样只留统计行（无耗时——存下来的转录没有执行计时），`Ctrl+O` 展开后照样看到每个工具与结果预览。分组在 `session_start` / `session_tree` / `session_compact` 重算 |
-| thinking | **折进块**：pi 每条 assistant 消息渲染一个隐藏的 `Thinking...` 行，多步思考的轮次会堆成一串。只吸收「后面跟着一个真正折进块的工具调用」的那些 thinking run（`format.ts` 的 `foldThinking`），文本存在那个工具行上；**折叠态不计数**，`Ctrl+O` 展开后以 dim 斜体渲染在该工具行上方（前 5 行 + `… N more lines`）。重放历史 / 非内置工具 / 带可见正文的消息保留原生行；thinking 设为 visible（`app.thinking.toggle`）时完全不吸收 |
+| thinking | **折进块**：pi 每条 assistant 消息渲染一个隐藏的 `Thinking...` 行，多步思考的轮次会堆成一串。只吸收「**同一条消息里，后面（中间隔着正文也算）跟着一个会被折叠的工具调用**」的那些 thinking run（`format.ts` 的 `foldThinking`），文本存在那个工具行上；**折叠态不计数**，`Ctrl+O` 展开后以 dim 斜体渲染在该工具行上方（前 5 行 + `… N more lines`）。尾部 run（后面没有工具调用，比如最终回答前的思考）与「后面只跟非内置工具」的 run 保留原生行；thinking 设为 visible（`app.thinking.toggle`）时完全不吸收 |
 
 ### 为什么跨消息合并、只在正文处断开
 
@@ -106,14 +106,17 @@
 
 pi 没有 per-message 钩子：`registerMessageRenderer` 只对 `type: "custom"` 的消息生效，`registerMarkdownTransformer` 只在 thinking **可见**时参与渲染（`hideThinkingBlock` 下走的是 `Text(hiddenThinkingLabel)`）。唯一入手点是组件本身，所以：
 
-1. `installThinkingFold()` 包裹包根导出的 `AssistantMessageComponent.prototype.updateContent`。包裹体只做一件事：把要被吸收的 thinking run 从交给原生实现的 message **副本**里去掉（`{...message, content}`，其余字段不变）。
+1. `installThinkingFold()` 包裹包根导出的 `AssistantMessageComponent.prototype.updateContent`。包裹体只做一件事：把要被吸收的 thinking run 从交给原生实现的 message **副本**里去掉（`{...message, content}`，其余字段不变）。包裹体是**接管式**的：把被替换的 native 挂在自己的 `piCompactCallsNative` 上，后加载的实例（`/reload` 会新建实例）替换它而不是叠加——用「装过就 return」的守卫会让所有 `updateContent` 永远走旧实例的闭包，而旧实例的状态在 `session_shutdown` 里已被清空。
 2. 哪些 run 能被吸收由 `format.ts` 的纯函数 `foldThinking(content, isFolded)` 决定，并被单测守住：
-   - 只要消息里有可见正文 → 一个都不算我们的（正文已经封口，那块不属于这里）；
-   - 一个 run 必须**紧跟着一个已折进块的工具调用**（`entries.get(id)?.group`）才被吸收，排在后面的尾部 run 留在原位；
-   - 非内置工具（subagent/MCP）、重放历史（没有实时事件 ⇒ 没有块）都吸不了，标签照旧。
+   - 一个 run 只要在**同一条消息里**后面（中间可以隔着正文）跟着一个会被折叠的工具调用就被吸收；正文留在原位；
+   - 尾部 run（后面没有工具调用）留在原位；
+   - 后面只跟非内置工具（subagent/MCP）的 run 也留在原位——它的文本该显示在那个原生行的上方，而不是被搬到后面的块里；
+   - 判定「会被折叠」的 `isFoldedCall()` 两条来源：live 看 `entries[id].group`，重放看**会话离线分组表**（`replaySpec.has(id)`）。
 3. 包裹体还有一个前置条件：`this.hideThinkingBlock === true`（read 不到则不吸收）。thinking 设成 visible 时那一行承载的是**全文**，吸进块里只剩 5 行预览反而是降级，而且那种模式下也没有“一堆相同单行标签”的问题。
 3. 被吸收的文本按「归属给哪个 toolCallId」存到对应的 `ToolEntry.thinking`（`THINKING_TEXT_LIMIT=8000`，保留头部，行数另存），不另外维护状态。
-4. 展开态（`Ctrl+O`）在工具行**上方**渲染它：`thinkingText` 色 + 斜体（同 pi 原生 thinking 文本的配色）、`EXPANDED_RESULT_LINES` 行 + `… N more lines`、lead 与该行结果的预览一致（`│   ` / 四空格）。折叠态什么都不加。
+4. 重建 chat 时消息组件先于工具行渲染，`/reload` 更是在会话分组算出来**之前**就把 chat 建好了：`regroupFromSession()` 算完分组后会 `refoldThinking()`（`WeakRef` 记录见过的消息组件），让那些组件再渲染一次，把 thinking 吸进块。
+
+5. 展开态（`Ctrl+O`）在工具行**上方**渲染它：`thinkingText` 色 + 斜体（同 pi 原生 thinking 文本的配色）、`EXPANDED_RESULT_LINES` 行 + `… N more lines`、lead 与该行结果的预览一致（`│   ` / 四空格）。折叠态什么都不加。
 
 幂等性：包裹体传给原生的是副本，原生会把它存为 `lastMessage`；之后的 `invalidate()` 拿副本重进包裹体，副本里已经没有 thinking，`foldThinking` 返回 `undefined`，原样交给原生 —— 归属过的文本不会被清空（只有真吸到东西时才写）。
 
@@ -132,7 +135,7 @@ node --test tests/*.test.ts
 - 块上**点击**展开依赖该行的 result 已经存在（pi 的 `createResultRegion` 先判 `this.result`），所以第一个工具还在跑时点击无效；`Ctrl+O` 任何时候都好用。
 - 非内置工具不参与分块（我们只能控制自己注册的工具行）。
 - 每个块前面都有一个 pi 强制的空行：`ToolExecutionComponent.render()` 在 `renderShell: "self"` 下硬编码 `lines.push("")`（仅内容非空时），扩展内去不掉；所以块与上面的正文/上一块之间总隔一个空行。
-- **thinking 只吸收“确属本块”的那部分**：只有当一条消息里存在一个已折进块的工具调用时，它前面（同一消息内）的 thinking run 才会被拿走；带可见正文的消息、非内置工具（subagent/MCP/…）保留原生 `Thinking...` 行。重放行现在也有块了，所以重放历史同样会吸收（原来的「重放留下一串 `Thinking...`」限制消失）。
+- **thinking 的吸收范围**：一条消息里，只要后面跟着一个会被折叠的工具调用，它前面的 thinking run 就被拿走——**中间隔着正文也算**（正文与块属于同一步）。保留原生 `Thinking...` 行的只有：尾部 run（后面没有工具调用，通常就是最终回答前的思考）与「后面只跟非内置工具（subagent/MCP）」的 run。live 与重放（含 `/reload`、`/tree`）行为一致。
 - 流式阶段 thinking 行会先出现再被吸走：工具行是在消息更新之后的 renderCall 里建的，所以参数还在流式生成时可能先看到 `Thinking...`，最晚到 `message_end` 被吸收。
 - thinking 在块里只显示前 `EXPANDED_RESULT_LINES` 行（+ `… N more lines`）；展开态不显示计数（块头不做 thinking 计数）。
 - 包裹 `updateContent` 是内部 API 依赖：导出不存在、或包裹内部抛错时都回退到原生渲染（扩展照常工作，只是 thinking 不折）。pi 升级后要重跑一次实机验证。
@@ -255,8 +258,24 @@ tmux 实机（`pi -ne -e extensions/pi-compact-calls/index.ts --session <本轮�
 
 tmux 实机（同一会话含「thinking + 3 工具调用、无正文」与「thinking + 正文 + 2 工具调用」两轮）：
 
-- 启动（`--session` 恢复）：无正文那轮**没有** `Thinking...`，有正文那轮保留（符合既定规则）✓
+> 历史记录：本轮之后又改了规则——「带正文的消息」也吸收（见第八轮），所以「有正文那轮保留」已不再成立。
+
+- 启动（`--session` 恢复）：无正文那轮**没有** `Thinking...` ✓
 - `/reload`：同上，无正文那轮不再冒 `Thinking...` ✓（修复前必现）
 - `Ctrl+O` 展开重放块：被吸收的 thinking 以 dim 斜体渲染在对应工具行上方（`│   The user asks: …`），说明文本确实存到了 entry ✓
 - `/reload` 之后**新跑一轮**（无正文 + 2 工具）：live 照常折叠 ✓（修复前该路径同样失效）
 - `/tree` 导航后重建：仍是折叠态 ✓
+
+## 验证记录（2026-09-21 第八轮，带正文的消息也吸收 thinking）
+
+用户定的规则变更：**只要后面跟着一个会被折叠的工具调用就吸**，不管中间有没有正文（Claude Code 那样干净）。
+
+单测：`node --test tests/*.test.ts` 39 项全过（`tests/thinking.test.ts` 改了 1 项、新增 1 项：正文夹在中间也吸收、正文留在原位、中间隔着非内置工具则不吸收）；本扩展 typecheck 0 报错。
+
+tmux 实机（会话含 `[thinking, toolCall×3]`、`[thinking, text, toolCall×2]` 两种消息）：
+
+- 启动（`--session` 恢复）：**整个转录 0 个 `Thinking...` 行**（两种消息都被吸收）✓
+- `/reload`：同样 0 个 ✓（scrollback 全量 grep）
+- `Ctrl+O` 展开那块：吸走的 thinking 以 dim 斜体渲染在对应工具行上方（`│   So I should output the text first, then make tool calls in the same turn.`）✓
+- live 新跑一轮（正文 + thinking + 一个工具）：正文下面直接是 `✓ bash: echo ab (0.0s)`，没有 `Thinking...` ✓
+- 未覆盖：尾部 run（最终回答前的思考）保留原生行——仅单测覆盖，本轮模型的回答没有再产出 thinking
