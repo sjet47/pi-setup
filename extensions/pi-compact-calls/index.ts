@@ -59,8 +59,6 @@ import { homedir } from "os";
 // =============================================================================
 // Tunables
 // =============================================================================
-/** Tool rows shown while the block is collapsed (before the "…" summary line). */
-const COLLAPSED_TOOL_LINES = 3;
 /** Result lines shown per tool when the block is expanded (Ctrl+O). */
 const EXPANDED_RESULT_LINES = 5;
 /** Argument summary length. */
@@ -358,22 +356,18 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 		);
 	}
 
-	// One hidden tool would cost the same one line as the "… 另有 1 次" summary, so
-	// show it instead of hiding exactly one real tool.
-	let visibleCount = COLLAPSED_TOOL_LINES;
-	if (group.tools.length === visibleCount + 1) visibleCount = group.tools.length;
-	const visible = group.expanded ? group.tools : group.tools.slice(0, visibleCount);
+	// Collapsed shows only the most recent call: what matters while a batch runs is
+	// what is happening now, and the header already carries the total count.
+	const visible = group.expanded ? group.tools : group.tools.slice(-1);
 	const hiddenCount = group.tools.length - visible.length;
 	visible.forEach((tool, index) => {
 		const isLastRow = index === visible.length - 1 && hiddenCount === 0;
-		const rail = group.tools.length === 1 ? "" : isLastRow ? RAIL_END : RAIL_MID;
+		const rail = visible.length === 1 ? "" : isLastRow ? RAIL_END : RAIL_MID;
 		lines.push(toolLine(rail, tool, now));
 		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth));
 	});
 	if (hiddenCount > 0) {
-		lines.push(
-			`${fg("dim", RAIL_END)}${fg("muted", `… 另有 ${hiddenCount} 次调用`)} ${fg("dim", "(Ctrl+O 展开)")}`,
-		);
+		lines.push(`${fg("dim", "… ")}${fg("muted", `另有 ${hiddenCount} 次调用`)} ${fg("dim", "(Ctrl+O 展开)")}`);
 	}
 
 	if (pending) ensureAnimation();
