@@ -206,6 +206,51 @@ test("composeHeader: width is measured without ANSI codes", () => {
 	assert.ok(styled.includes("Ctrl+O to expand"));
 });
 
+test("composeHeader: the block's last line keeps what the run did", () => {
+	const parts = {
+		state: "ok" as const,
+		icon: "✓",
+		count: 3,
+		failed: 0,
+		durationMs: 6100,
+		breakdown: "2 bash, 1 read",
+		hint: "Ctrl+O to expand",
+	};
+	assert.equal(composeHeader(parts, 200), "✓ 3 tool calls (2 bash, 1 read) · 6.1s · Ctrl+O to expand");
+	// Width still governs: the hint and the breakdown go before the count does.
+	assert.equal(composeHeader(parts, 40), "✓ 3 tool calls (2 bash, 1 read) · 6.1s");
+	assert.equal(composeHeader(parts, 30), "✓ 3 tool calls · 6.1s");
+});
+
+test("composeHeader: a failure keeps its error tail on the collapsed line", () => {
+	const parts = {
+		state: "failed" as const,
+		icon: "✗",
+		count: 4,
+		failed: 1,
+		durationMs: 5000,
+		hint: "Ctrl+O to expand",
+		errorTail: "cd: /nope: No such file or directory (exit 1)",
+	};
+	assert.equal(
+		composeHeader(parts, 200),
+		"✗ 4 tool calls · 1 failed · 5.0s — cd: /nope: No such file or directory (exit 1) · Ctrl+O to expand",
+	);
+	// The tail outranks the duration: what the failure was beats how long it took.
+	assert.equal(composeHeader(parts, 64), "✗ 4 tool calls · 1 failed — cd: /nope: No such file or dire…");
+	// Too narrow for a readable tail ⇒ dropped whole, not cut to pieces.
+	assert.equal(composeHeader(parts, 26), "✗ 4 tool calls · 1 failed");
+	assert.equal(composeHeader(parts, 24), "✗ 4 tool calls");
+	// A short tail is shown in full even when it eats half the line.
+	assert.equal(composeHeader({ ...parts, errorTail: "exit 1" }, 200), "✗ 4 tool calls · 1 failed · 5.0s — exit 1 · Ctrl+O to expand");
+	// A whole tail beats the hint on an otherwise full line: the hint goes first.
+	const failure = { state: "failed" as const, icon: "✗", count: 3, failed: 1, durationMs: 2000, hint: "Ctrl+O to expand" };
+	assert.equal(
+		composeHeader({ ...failure, errorTail: "cd: /nonexistent-dir-xyz: No such file or directory (exit 1)" }, 110),
+		"✗ 3 tool calls · 1 failed · 2.0s — cd: /nonexistent-dir-xyz: No such file or directory (exit 1)",
+	);
+});
+
 test("composeToolLine: the summary gives way, the duration survives", () => {
 	const parts = {
 		rail: "├ ",

@@ -2,19 +2,26 @@
 
 把连续的内置工具调用（`read` / `bash` / `edit` / `write` / `find` / `grep` / `ls`）折叠成一个紧凑块。
 
-一轮里连续的工具调用（中间没有可见正文）合成一块，折叠态只占 2 行 —— 块头 + 一条活动行：
+一轮里连续的工具调用（中间没有可见正文）合成一块。折叠态最多 2 行 —— 块头 + 一条活动行：
 
 ```
  ⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
  └ ⠋ bash: sleep 3 && echo one (3.0s)
 ```
 
-有失败时块头直接报数，活动行落在最近失败的那个调用上，并带上错误输出的末行：
+这批调用**全部跑完**（块已封口、无调用在跑）后，活动行收掉，只剩块头那一行 —— 它是这一次批量调用在转录里的唯一痕迹：
 
 ```
- ✗ 4 tool calls · 1 failed · 5.0s · Ctrl+O to expand
- └ ✗ bash: cd /nonexistent-dir-xyz (0.0s) — cd: /nonexistent-dir-xyz: No such file or directory (exit 1)
+ ✓ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
 ```
+
+有失败时块头直接报数，并带上失败调用的错误末行（否则折叠后完全看不到原因）：
+
+```
+ ✗ 4 tool calls · 1 failed · 5.0s — cd: /nonexistent-dir-xyz: No such file or directory (exit 1)
+```
+
+（pi 还会在块前强制插一个空行，见「已知限制」。）
 
 `Ctrl+O` 展开后逐个工具一行，每行下面带结果预览；非最后一个工具的预览行延续 `│` rail：
 
@@ -46,7 +53,9 @@
 | 情况 | 渲染 |
 |---|---|
 | **一轮里连续**（中间没有可见正文）的工具调用 | 合成一块 —— 同一条消息里的并行批、跨多条消息的多步调用都算 |
-| 块头（仅 ≥ 2 个调用） | `图标 N tool calls (类型分布) · M failed · 耗时 · Ctrl+O to expand`。类型分布只在块里混了 ≥ 2 种工具时出现；`M failed` 只在有失败时出现；`Ctrl+O to expand` 只在折叠态出现。宽度不够时按 提示 → 类型分布 → 耗时 → failed 的顺序丢弃，计数永远保留 |
+| 块头（仅 ≥ 2 个调用） | `图标 N tool calls (类型分布) · M failed · 耗时 · Ctrl+O to expand`。类型分布只在块里混了 ≥ 2 种工具时出现；`M failed` 只在有失败时出现；`Ctrl+O to expand` 只在折叠态出现 |
+| 块封口后 | 活动行收掉，只留块头那一行（即上列的统计行）；有失败时那一行带上错误末行 |
+| 块头排版 | 宽度不够时按 提示 → 类型分布 → 耗时 → failed 的顺序丢弃，计数永远保留；失败的错误末行优先级高于耗时/类型分布/提示（能完整放下它就丢掉提示），最多占半屏宽，站不下 12 列就不显示 |
 | 块头图标 | `⠋` 有调用在跑；`⠿`（muted，静态，不跑定时器）块还开着但没有调用在跑 = 模型正在生成下一个调用，**此时不显示 `✓`**；块封口后才落定为 `✓` 全部成功 / `✗` 有失败 / `○` 有调用始终没执行 |
 | 块头耗时 | 工具执行区间的**并集**（纯工具时间）：并行调用不重复计，消息之间模型生成的时间不计，在跑的调用计到当前时刻 |
 | 工具行图标 | `○`（muted）queued：参数还在流式生成 / 排队中 / 最终没执行；`⠋` 执行中；`✓` / `✗` 已有结果 |
@@ -54,7 +63,7 @@
 | 只有 1 个工具 | 不加块头，直接一行 `⠋ bash: sleep 25 && echo one (17.5s)` |
 | 出现可见正文 / 新用户消息 / `agent_end` | 结束当前块，之后的工具调用另起一块 |
 | 非内置工具 | 在它的位置断块：已执行的留在旧块，还在排队（queued）的内置调用移到新块，视觉顺序与 transcript 一致 |
-| 折叠态 | 块头 + 1 条活动行（`└` rail），共 2 行 |
+| 折叠态 | 运行中：块头 + 1 条活动行（`└` rail）；块封口且无调用在跑：只剩块头 1 行 |
 | 展开态（`Ctrl+O`） | 每个工具一行（带树杈）+ 结果预览，运行中也能看到流式输出。`bash` 取**末** 5 行（上方 `… N earlier lines`）；`read`/`grep`/`find`/`ls`/`write` 取前 5 行（下方 `… N more lines`）；`edit` 成功时渲染 diff（pi 原生 `renderDiff`，最多 20 行）而不是 `Successfully replaced…` |
 | 工具行排版 | 按终端宽度：先保 rail + 图标 + 工具名 + 统计 + 耗时，剩余宽度给摘要，超出用 `…` 截断 —— 窄终端下耗时不会被截掉。失败行的错误末行与摘要分享剩余宽度（最多占一半，摘要短则更多；截断后不足 12 列就不显示） |
 | 摘要内容 | `read` 带范围（`foo.ts:120-179` / 只有 offset 时 `:120+` / 只有 limit 时 `:1-50`）；`grep` 带 glob（`TODO in src [*.ts]`）；多行 `bash` 只显示首个非空行 + ` …`；`edit` 追加 `+N −M`（按 `details.diff` 计数）；`write` 追加 `N lines`（参数流式生成时实时增长） |
@@ -67,7 +76,7 @@
 
 历史教训：第一版就是跨消息合并，但折叠态当时显示的是「最早的 3 个工具」，于是后来加入的工具渲染成 0 行、位置错位、活动被截断在计数里 —— 被当成 bug 报了回来。改成「一条 assistant 消息 = 一块」后合并不再发生，又不满足需求（要的是「一轮里连续的工具调用合为一条」）。
 
-最终形态 = 跨消息合并 **+** 折叠态只显示「正在跑 / 最近失败 / 最新」那一个：块变成一条随流程持续更新的活动行，当初「看不到当前在干什么」的根因消失。
+最终形态 = 跨消息合并 **+** 折叠态只显示「正在跑 / 最近失败 / 最新」那一个：块变成一条随流程持续更新的活动行，当初「看不到当前在干什么」的根因消失。（块封口后活动行也收掉，只留块头那一行。）
 
 两个**不能**用来做断点的信号（若以后想改回去）：
 
@@ -112,7 +121,7 @@ node --test tests/*.test.ts
 
 ## 已知限制
 
-- 重放的历史工具行渲染成单行紧凑行（没有实时事件可用于分组），不是原生多行样式。
+- 重放的历史工具行渲染成单行紧凑行（没有实时事件可用于分组），不是原生多行样式。**压缩重放历史（只留统计行）是下一批的事**：需要从 `ctx.sessionManager.buildContextEntries()` 离线算分组表（`/reload` 时 pi 是**先**恢复 chat 再发 `session_start`，所以要「事后挂组 + 强制重绘」）。
 - 重放行的展开态（`Ctrl+O`）依赖 `renderCall` 的 `context.expanded`，`isError` 依赖 `context.isError`（重放时也可用）；但 `renderResult` 拿到的 result 对象**不含** `isError`，不要用它覆盖状态。
 - 块上**点击**展开依赖该行的 result 已经存在（pi 的 `createResultRegion` 先判 `this.result`），所以第一个工具还在跑时点击无效；`Ctrl+O` 任何时候都好用。
 - 非内置工具不参与分块（我们只能控制自己注册的工具行）。
@@ -120,6 +129,7 @@ node --test tests/*.test.ts
 - 流式阶段 thinking 行会先出现再被吸走：工具行是在消息更新之后的 renderCall 里建的，所以参数还在流式生成时可能先看到 `Thinking...`，最晚到 `message_end` 被吸收。
 - thinking 在块里只显示前 `EXPANDED_RESULT_LINES` 行（+ `… N more lines`）；展开态不显示计数（块头不做 thinking 计数）。
 - 包裹 `updateContent` 是内部 API 依赖：导出不存在、或包裹内部抛错时都回退到原生渲染（扩展照常工作，只是 thinking 不折）。pi 升级后要重跑一次实机验证。
+- 每个块前面都有一个 pi 强制的空行：`ToolExecutionComponent.render()` 在 `renderShell: "self"` 下硬编码 `lines.push("")`（仅内容非空时），扩展内去不掉。所以块与上面的正文/上一块之间总隔一个空行（本扩展的排版不加额外空行，那是 pi 加的）。
 - 单工具块没有块头，所以第一个调用的参数刚开始流式生成时是 1 行（`○ bash: …`），第二个调用出现后变成 2 行（块头 + 活动行）—— 这 1 → 2 的增长是设计使然，不是闪烁。
 - 单工具块的工具行在执行完后就显示 `✓`（那个调用确实成功了）；「块未封口不显示 `✓`」只约束块头。
 - 常量（都在 `index.ts` 顶部，没有配置文件）：结果预览 `EXPANDED_RESULT_LINES = 5`、diff 预览 `EXPANDED_DIFF_LINES = 20`、结果保留 `RESULT_TEXT_LIMIT = 4000`（bash 留尾部，其他留头部，按整行裁；完整行数另存，所以 `… N` 行数是真实的）、diff 保留 `DIFF_TEXT_LIMIT = 8000`。摘要没有固定字符上限（`format.ts` 的 `SUMMARY_HARD_LIMIT = 240` 只是防御性上限，实际长度由终端宽度决定）。折叠态固定只显示 1 条活动行，没有对应常量。
@@ -199,3 +209,19 @@ tmux 实机（`pi -ne -e extensions/pi-compact-calls/index.ts`，110 列；排�
 - **吸收（端到端）**：排查 `deploy.sh` 场景，工具消息 `['thinking','toolCall']`（1004 字符 thinking）→ 折叠态只有 `✓ 4 tool calls (2 read, 1 bash, 1 ls) · 0.1s` + `└ ✓ ls: app`，**无 `Thinking...`、无多余空行**；最终回答那条消息（thinking + 正文）保留原生 `Thinking...` 行 ✓
 - **展开态**：`Ctrl+O` 后吸收的 thinking 带 `│   ` rail 渲染在第一个工具行上方，5 行 + `… 10 more lines` ✓
 - **门控为 false 时不吸收**（thinking visible）：仅由代码路径保证（门控在进入 fold 前返回），未实机切换 thinking 验证。
+
+## 验证记录（2026-09-21 第五轮，块封口后只留统计行）
+
+单测：`node --test tests/*.test.ts` 30 项全过（`composeHeader` 的错误末行排版：完整尾串优先于展开提示、超半屏宽截断、站不下 12 列就整段丢掉、窄到连 `1 failed` 都放不下时先丢它）；本扩展 typecheck 0 报错。
+
+tmux 实机（`pi -ne -e extensions/pi-compact-calls/index.ts`，110 列 / 60 列各跑一遍，1s 间隔 `capture-pane`）：
+
+- **运行中**：4 个并行 bash（含一个 5s 的）→ `⠋ 4 tool calls · 0.7s · Ctrl+O to expand` + `└ ⠋ bash: sleep 5 && echo five (3.1s)`；并行批里失败的 `cd` 先出结果后，块头转 `⠿`、活动行落到失败的 `cd` 并带错误末行 ✓
+- **封口后**：同一批跑完只剩 1 行 `✓ 4 tool calls · 5.0s · Ctrl+O to expand`（活动行收掉，块头保留图标/耗时/提示）✓
+- **失败批次**：`✗ 3 tool calls · 1 failed · 3.0s — cd: /nonexistent-dir-xyz: No such file or directory (exit 1)`（为放下完整错误末行，`Ctrl+O to expand` 被丢掉）✓
+- **60 列**：同批同一行降级为 `✗ 3 tool calls · 1 failed — cd: /nonexistent-dir-xyz: No…`（耗时/提示丢掉、错误末行截断，仍不超宽）✓
+- **单工具块**：不加块头，一行 `✓ bash: echo solo (0.0s)`，封口前后不变 ✓
+- **`Ctrl+O`**：展开为块头 + 全部工具行与结果预览，再按一次收起 ✓
+- **`/reload` 重放**：历史行仍是单行紧凑行（`✓ bash: echo solo`、`✗ bash: cd /nonexistent-dir-xyz — cd: …`），没有崩、没有空块 ✓（重放压缩是下一批）
+
+未在实机验证（仅单测覆盖）：更窄终端下统计行的丢弃顺序、宽字符错误末行的截断。

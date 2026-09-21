@@ -1,13 +1,23 @@
 /**
  * pi-compact-calls — fold consecutive built-in tool calls into one compact block.
  *
- * A live turn renders as two lines while collapsed:
+ * A block is a run of consecutive built-in tool calls. While it runs, the collapsed
+ * block is two lines — the header plus the call in progress:
  *
  *   ⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
  *   └ ⠋ bash: sleep 3 && echo one (3.0s)
  *
- * and, after Ctrl+O, as one row per tool with a result preview (bash: last
- * lines, edit: its diff, everything else: first lines):
+ * Once every call of the batch is done (the block is closed and nothing is running)
+ * the activity line goes away and only the header — the block's stat line — is left:
+ *
+ *   ✓ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
+ *
+ * A failure keeps its tail there, since that line is then the only trace of the run:
+ *
+ *   ✗ 3 tool calls (2 bash, 1 edit) · 1 failed · 3.0s — cd: /nope: No such file or directory (exit 1) · Ctrl+O to expand
+ *
+ * After Ctrl+O either kind shows one row per tool with a result preview (bash:
+ * last lines, edit: its diff, everything else: first lines):
  *
  *   ✗ 3 tool calls (2 bash, 1 edit) · 1 failed · 3.0s
  *   ├ ✓ bash: sleep 3 && echo one (3.0s)
@@ -514,41 +524,65 @@ function headerIcon(state: ReturnType<typeof headerState>, now: number): string 
 	}
 }
 
+/** Error tail of the most recent failed call, for a collapsed block's stat line. */
+function collapsedErrorTail(tools: readonly ToolEntry[]): string | undefined {
+	for (let index = tools.length - 1; index >= 0; index -= 1) {
+		const tool = tools[index]!;
+		if (toolState(tool) === "failed" && tool.errorTail) return tool.errorTail;
+	}
+	return undefined;
+}
+
 function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const now = Date.now();
 	const state = headerState(group.tools, group.closed);
 	const contentWidth = Math.max(1, width - INDENT.length);
-
-	// A single tool needs no header: the tool line already carries state, summary
-	// and duration. Only batches show the “N tool calls · total” summary.
-	const lines: string[] = [];
-	if (group.tools.length > 1) {
-		// Pure tool time: the union of the execution intervals, so parallel calls do
-		// not double count and the model's thinking time between calls is left out.
-		const intervals = group.tools
-			.filter((tool) => tool.startedAt !== undefined)
-			.map((tool) => ({ start: tool.startedAt!, end: tool.endedAt }));
-		lines.push(
-			composeHeader(
-				{
-					state,
-					icon: headerIcon(state, now),
-					count: group.tools.length,
-					failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
-					durationMs: unionDuration(intervals, now),
-					breakdown: typeBreakdown(group.tools.map((tool) => tool.name)) || undefined,
-					hint: group.expanded ? undefined : EXPAND_HINT,
-				},
-				contentWidth,
-				paint,
-			),
+	const multi = group.tools.length > 1;
+	// Nothing left to watch: the batch ran to completion, so the activity line goes
+	// away and the header alone stays. A group closed while a call was still running
+	// (abort) is not settled — the running call stays visible.
+	const settled = group.closed && state !== "running";
+	// Pure tool time: the union of the execution intervals, so parallel calls do not
+	// double count and the model's thinking time between calls is left out.
+	const intervals = group.tools
+		.filter((tool) => tool.startedAt !== undefined)
+		.map((tool) => ({ start: tool.startedAt!, end: tool.endedAt }));
+	const headerLine = (icon: string, hint?: string, errorTail?: string) =>
+		composeHeader(
+			{
+				state,
+				icon,
+				count: group.tools.length,
+				failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
+				durationMs: unionDuration(intervals, now),
+				breakdown: typeBreakdown(group.tools.map((tool) => tool.name)) || undefined,
+				hint,
+				errorTail,
+			},
+			contentWidth,
+			paint,
 		);
+
+	// A single tool needs no header: the tool line already carries state, summary and
+	// duration. A collapsed multi-tool block is the header plus the call in progress
+	// while it runs — and, once the batch is done, the header alone.
+	const lines: string[] = [];
+	let visible: readonly ToolEntry[] = [];
+	if (group.expanded) {
+		visible = group.tools;
+		if (multi) lines.push(headerLine(headerIcon(state, now)));
+	} else if (!multi) {
+		visible = group.tools.slice(0, 1);
+	} else if (!settled) {
+		// The call still running, else the most recent failure, else the last call.
+		visible = [pickCollapsedTool(group.tools)];
+		lines.push(headerLine(headerIcon(state, now), EXPAND_HINT));
+	} else {
+		// Done: the header line is all that is left of the batch, so it carries what the
+		// block did (`1 failed`) and why it failed (the error tail).
+		lines.push(headerLine(headerIcon(state, now), EXPAND_HINT, collapsedErrorTail(group.tools)));
 	}
 
-	// Collapsed = header + one activity line: the call still running if there is
-	// one, else the most recent failure, else the last call. The header carries
-	// the total count and the expand hint. A single-tool block is just its line.
-	const visible = group.expanded ? group.tools : [pickCollapsedTool(group.tools)];
 	visible.forEach((tool, index) => {
 		const isLast = index === visible.length - 1;
 		const rail = group.tools.length === 1 ? "" : isLast ? RAIL_END : RAIL_MID;

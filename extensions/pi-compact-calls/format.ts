@@ -364,31 +364,69 @@ export type HeaderParts = {
 	breakdown?: string;
 	/** Dim trailing hint, e.g. "Ctrl+O to expand" (collapsed blocks only). */
 	hint?: string;
+	/**
+	 * A failed call's error tail: what is left of the failure once the block
+	 * collapses to its header line. Room for it is reserved first, so the numbers give
+	 * up their optional parts before it loses its own; it is dropped (rather than cut
+	 * into unreadable pieces) when even that does not fit.
+	 */
+	errorTail?: string;
 };
 
 /**
- * Compose the block header for `width` columns. When it does not fit, optional
- * parts are dropped lowest priority first; the priority (high → low) is
- * count > failed > duration > breakdown > hint.
+ * Compose the block header — the line a collapsed block keeps — for `width` columns.
+ * When it does not fit, optional parts are dropped lowest priority first; the priority
+ * (high → low) is count > failed > error tail > duration > breakdown > hint.
  */
 export function composeHeader(parts: HeaderParts, width: number, paint: Paint = PLAIN_PAINT): string {
 	const color = HEADER_COLORS[parts.state];
 	const sep = ` ${paint.fg("muted", "·")} `;
 	const head = `${paint.fg(color, parts.icon)} ${paint.fg(color, paint.bold(`${parts.count} tool calls`))}`;
+	// A collapsed block is the only trace of a failure, so its reason keeps its room:
+	// the numbers give up the breakdown and the duration before the tail is cut. Half
+	// the width is the most the tail may take.
+	const failedText = parts.failed > 0 ? sep + paint.fg("error", `${parts.failed} failed`) : "";
+	const tailLead = " — ";
+	const tailWanted = parts.errorTail ? visibleWidth(parts.errorTail) : 0;
+	const tailRoomLeft = width - visibleWidth(head) - visibleWidth(failedText) - visibleWidth(tailLead);
+	const hintWidth = parts.hint ? visibleWidth(sep) + visibleWidth(parts.hint) : 0;
+	// A whole error tail is worth more than the expand hint, so the hint yields to it;
+	// half the width is still the most any one error may take.
+	let tailBudget = Math.min(
+		tailWanted,
+		Math.max(Math.floor(width / 2), tailRoomLeft - hintWidth),
+		Math.max(0, tailRoomLeft),
+	);
+	// A cut tail must stay readable; one that fits whole is always fine.
+	if (tailBudget < Math.min(MIN_ERROR_TAIL_WIDTH, tailWanted)) tailBudget = 0;
+	const tailRoom = tailBudget > 0 ? tailBudget + visibleWidth(tailLead) : 0;
+
 	// Display order; `drop` is the order in which parts are given up (0 first).
 	const optional: { text: string; drop: number }[] = [];
 	if (parts.breakdown) optional.push({ text: ` ${paint.fg("dim", `(${parts.breakdown})`)}`, drop: 1 });
-	if (parts.failed > 0) optional.push({ text: sep + paint.fg("error", `${parts.failed} failed`), drop: 3 });
+	if (parts.failed > 0) optional.push({ text: failedText, drop: 3 });
 	optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 2 });
-	if (parts.hint) optional.push({ text: sep + paint.fg("dim", parts.hint), drop: 0 });
 
 	let kept = optional;
+	let line: string;
 	for (;;) {
-		const line = head + kept.map((part) => part.text).join("");
-		if (visibleWidth(line) <= width || kept.length === 0) return line;
+		line = head + kept.map((part) => part.text).join("");
+		if (visibleWidth(line) <= width - tailRoom || kept.length === 0) break;
 		const lowest = Math.min(...kept.map((part) => part.drop));
 		kept = kept.filter((part) => part.drop !== lowest);
 	}
+	if (tailBudget > 0) {
+		const shown = Math.min(tailBudget, Math.max(0, width - visibleWidth(line) - visibleWidth(tailLead)));
+		if (shown >= Math.min(MIN_ERROR_TAIL_WIDTH, tailWanted)) {
+			line += paint.fg("dim", tailLead) + paint.fg("error", truncatePlain(parts.errorTail!, shown));
+		}
+	}
+	// The hint is the first thing to go and the last thing on the line.
+	if (parts.hint) {
+		const hint = sep + paint.fg("dim", parts.hint);
+		if (visibleWidth(line) + visibleWidth(hint) <= width) line += hint;
+	}
+	return line;
 }
 
 /** Truncate plain (unstyled) text to `width` columns; wide characters are handled by pi-tui. */
