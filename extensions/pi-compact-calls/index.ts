@@ -56,16 +56,8 @@
  * - Pure logic (formatting, selection, width-based layout) lives in format.ts
  *   and is unit-tested with `node --test tests/*.test.ts`.
  *
- * - Thinking rows are suppressed globally, not folded: pi renders one hidden
- *   `Thinking...` row per assistant message, and once the tool rows of a
- *   multi-step turn collapse to 0 lines those labels pile up as a run of
- *   identical rows. pi offers no per-message hook for that (registerMessageRenderer
- *   only covers custom messages, the markdown transformer only runs while
- *   thinking is visible), so we clear the label through the public
- *   `ctx.ui.setHiddenThinkingLabel` API: `Text("")` renders 0 lines, so the rows
- *   vanish entirely. This is global and silent by decision — no thinking count in
- *   the block header, no thinking text on expand; use pi's thinking toggle
- *   (`app.thinking.toggle`) to read the full text when needed.
+ * - Thinking is deliberately untouched: pi keeps rendering its own `Thinking...`
+ *   row (click to expand). Nothing here depends on pi internals.
  *
  * - Replayed history (resume, tree navigation, /reload) produces no
  *   tool_execution_* events, so those rows cannot be grouped; they render as a
@@ -624,12 +616,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		currentTheme = ctx.ui.theme;
-		// Drop the hidden-thinking label so a turn that thinks between tool calls
-		// does not stack one `Thinking...` row per assistant message next to the
-		// folded block. Re-applied on every session_start because pi resets the label
-		// to its default when extensions are unbound (reload) and on session switch.
-		// No-op when thinking is set to visible: the label is unused then.
-		ctx.ui.setHiddenThinkingLabel("");
 		resetState();
 	});
 
