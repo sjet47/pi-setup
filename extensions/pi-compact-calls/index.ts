@@ -265,8 +265,11 @@ function regroupFromSession(ctx: ExtensionContext): void {
 	live = false;
 	for (const entry of entries.values()) entry.group = undefined;
 	replaySpec = buildReplaySpec(ctx);
-	// Rows may already exist (pi restores the chat before session_start on /reload), so
-	// ask for a frame: ones that predate this grouping attach to it while rendering.
+	// /reload renders the chat (and therefore this thinking) before the grouping above
+	// exists: those components render once more so the thinking lands in its block.
+	refoldThinking();
+	// Rows may already exist too, so ask for a frame: ones that predate the grouping
+	// attach to it while rendering.
 	repaint?.();
 }
 
@@ -728,14 +731,67 @@ class RowComponent implements Component {
  * - a missing export (future pi) leaves the extension fully working, just with
  *   native thinking rows.
  */
+/**
+ * Assistant message components the thinking wrapper has seen. A message's thinking can
+ * only be absorbed once its tool calls are known to be inside a block — for a replayed
+ * transcript that is known only after the grouping is derived, and /reload builds the
+ * chat *before* that, so those components have to render once more (see refoldThinking).
+ * Weak refs keep this from pinning components that a rebuild has thrown away.
+ */
+const thinkingHosts = new Set<WeakRef<{ invalidate(): void }>>();
+const knownThinkingHosts = new WeakSet<object>();
+
+function rememberThinkingHost(host: object): void {
+	if (!host || knownThinkingHosts.has(host)) return;
+	if (typeof (host as { invalidate?: unknown }).invalidate !== "function") return;
+	knownThinkingHosts.add(host);
+	thinkingHosts.add(new WeakRef(host as { invalidate(): void }));
+}
+
+/** Let every message component render once more, so its thinking folds into its block. */
+function refoldThinking(): void {
+	for (const host of thinkingHosts) {
+		const component = host.deref();
+		if (!component) {
+			thinkingHosts.delete(host);
+			continue;
+		}
+		try {
+			component.invalidate();
+		} catch {
+			// A component of a session that is gone: dropping it is enough.
+			thinkingHosts.delete(host);
+		}
+	}
+}
+
+/**
+ * Is this call inside a block? A live row joins one before this is asked (renderCall
+ * runs first); a replayed row is listed in the session-derived spec, which is ready
+ * before the row exists.
+ */
+function isFoldedCall(toolCallId: string): boolean {
+	return entries.get(toolCallId)?.group !== undefined || replaySpec?.has(toolCallId) === true;
+}
+
+/** The installed wrapper, carrying the native method it replaced so a later instance can take over. */
+type ThinkingFoldWrapper = ((this: any, message: any, isStreaming?: boolean) => void) & {
+	piCompactCallsNative?: (message: any, isStreaming?: boolean) => void;
+};
+
 function installThinkingFold(): void {
 	const component = (piAgent as unknown as { AssistantMessageComponent?: { prototype: any } }).AssistantMessageComponent;
 	const proto = component?.prototype;
-	if (!proto || typeof proto.updateContent !== "function" || proto.piCompactCallsThinkingFold) return;
-	const native = proto.updateContent as (message: any, isStreaming?: boolean) => void;
-	proto.updateContent = function (this: any, message: any, isStreaming?: boolean) {
+	if (!proto || typeof proto.updateContent !== "function") return;
+	// An earlier instance may have wrapped this already — after /reload it has, and its
+	// module state (entries, grouping, hosts) is dead. Take over instead of stacking a
+	// second wrapper on top of it, otherwise the fold keeps asking the old instance.
+	const installed = proto.piCompactCallsThinkingFold as ThinkingFoldWrapper | undefined;
+	const native = (installed?.piCompactCallsNative ?? proto.updateContent) as (message: any, isStreaming?: boolean) => void;
+	const wrapper: ThinkingFoldWrapper = function (this: any, message: any, isStreaming?: boolean) {
 		let rendered = message;
 		try {
+			rememberThinkingHost(this);
 			// Fold only while thinking renders as a label: with thinking set to visible
 			// the user is reading the full text, and a five-line preview in the block
 			// would be a downgrade. `hideThinkingBlock` is a private field of this very
@@ -746,13 +802,15 @@ function installThinkingFold(): void {
 		}
 		return native.call(this, rendered, isStreaming);
 	};
-	proto.piCompactCallsThinkingFold = true;
+	wrapper.piCompactCallsNative = native;
+	proto.updateContent = wrapper;
+	proto.piCompactCallsThinkingFold = wrapper;
 }
 
 /** Move the thinking of a message into the blocks its tool calls joined. */
 function foldThinkingOfMessage(message: any): any | undefined {
 	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return undefined;
-	const folded = foldThinking(message.content, (toolCallId) => entries.get(toolCallId)?.group !== undefined);
+	const folded = foldThinking(message.content, isFoldedCall);
 	if (!folded) return undefined;
 	// Rows are created right after the message update that first carries the call,
 	// so on that first frame `entries` may not know the id yet; the next update

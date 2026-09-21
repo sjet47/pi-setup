@@ -91,6 +91,9 @@
 - pi 每帧全量重渲染整棵树、不做 dirty 跳过，所以 leader 会自动带上后加入的工具；重绘由 pi 自己的工具事件 + 我们的 spinner 定时器（100ms）驱动，定时器复用 `context.invalidate()`（内部已调 `ui.requestRender()`），因此**不需要通过 widget 去偷 TUI 实例**。
 - 分块边界：`message_start(user)`（新的一轮 ⇒ 新块）、`tool_execution_start` 里非内置工具名（⇒ 在该处拆块）、出现可见正文（`text_*` 事件且对应块非空 ⇒ 断块）；`agent_end` 也封口。assistant 消息边界**不**断开。
 - **重放分组**（`/reload`、`-c`、`/tree`、压缩后）：重放行没有任何 `tool_execution_*` 事件，所以分组不用事件推，而是把会话消息再折一遍——`ctx.sessionManager.buildContextEntries()` → `sessionEntryToContextMessages` → 纯函数 `replayGroups`（`tests/replay.test.ts`）得到「哪些 toolCallId 同块 + 转录顺序」，`renderCall` 按 id 挂组（幂等）。`session_start` / `session_tree` / `session_compact` 时 `regroupFromSession()` 重算它并清掉所有行的组。
+- 折叠判定（`isFoldedCall`）对 live 与重放都成立：live 看 `entries[id].group`，重放看**离线分组表**（`replaySpec.has(id)`）——重建 chat 时消息组件先于工具行渲染，那一刻 `entries` 里还没有这个 id。
+- 包裹体（`installThinkingFold`）是**接管式**的：新实例把 native 挂在包裹体上并替换掉上一个实例的包裹体。pi 在 `/reload` 时会新建扩展实例，若沿用「装过就 return」的守卫，之后的渲染会一直用**旧实例的闭包**（其 `entries`/分组表在 `session_shutdown` 里已被清空）⇒ 折叠判定永远拿不到分组，live 与重放的 thinking 都会重新冒出来。
+- 重放历史在 `/reload` 下先建行、后分组：`regroupFromSession()` 算完分组后会 `refoldThinking()`（让已渲染的消息组件再跑一次 `updateContent`），否则那些 `Thinking...` 行会留下来。
 - 挂组是**惰性 + 事件驱动**两条路：`renderCall` 里挂（重建时每行都会走一遍，顺序与转录一致），以及 `RowComponent.render()` 里兜底挂（`/reload` 是**先**建行后发 `session_start`，那时 spec 还没算好）—— 兜底挂上后调一次 `repaint()` 请 pi 再画一帧，让 leader 带上完整成员。
 - **每个文本块只封口一次**（按 `contentIndex` 去重，`format.ts` 的 `shouldSealText`）。`text_start`/`text_delta`/`text_end` 携带的都是**累积**文本，所以「非空就封口」会反复触发；而 `text_end` 到达时 message.content 已经含本消息的 toolCall，pi 又是在扩展处理函数**之前**建行 —— 多封一次就会把本消息自己的工具行关在「只有 1 个成员的已封口组」里，表现为几个调用各自渲染成独立一行（`✓ read: …` / `✓ grep: …`，都没有块头）。
 - **入组时机**：`renderCall` 在参数还在流式生成时就会被调用，早于 `tool_execution_start`。用 `agent_start`/`agent_end` 记录 live 状态；live 期间 `renderCall` 见到新的 toolCallId 就立刻加入当前打开的块（没有则新建），所以不会先画成独立一行、执行开始后又塌成 0 行。`pending` / `startedAt` 仍然只由 `tool_execution_start` 设置。
@@ -242,3 +245,18 @@ tmux 实机（`pi -ne -e extensions/pi-compact-calls/index.ts --session <本轮�
 - **live 不受影响**：同一会话里新跑一轮仍是 `⠋ 3 tool calls · 0.0s · Ctrl+O to expand` → 封口后 `✓ 3 tool calls · 0.0s · Ctrl+O to expand` ✓
 - **`/compact` 未单独实机触发**（该会话太小，pi 直接拒绝：`Nothing to compact`），但它走的是 `/tree` 同一个 `regroupFromSession()`；两种时序（先重算后重建 / 先重建后重算）分别由 `/tree` 与 `/reload` 覆盖 ✓
 - 排查中用带日志的副本（`extensions/pi-compact-calls/replay-dbg.ts`，验证后删除）确认：重放行全部走 `joinReplay`（`live:false`），只有真正新跑的调用走 `joinLive` ✓
+
+## 验证记录（2026-09-21 第七轮，重放 thinking 折叠修复）
+
+用户反馈：`/reload` 后 `Thinking...` 又冒出来（live 明明是吸走的）。实测确认两条独立的 bug：
+
+1. **折叠判定拿不到分组**：重建 chat 时 `AssistantMessageComponent` 先于工具行渲染，那一刻 `entries` 里还没有该 toolCallId ⇒ 判定失败；而且之后没人再让消息组件重渲染。修法：判定同时认**会话离线分组表**的 id，并在 `regroupFromSession()` 里 `refoldThinking()`。
+2. **包裹体被旧实例占住**：`installThinkingFold()` 原来「装过就 return」，`/reload` 新建的实例不再安装 ⇒ 后续所有 `updateContent` 仍走**旧实例的闭包**，而它的状态已被 `session_shutdown` 的 `resetState()` 清空 ⇒ 连 live 的折叠也在 `/reload` 后失效。修法：包裹体把 native 挂在自身属性上，新实例**接管**（替换而非叠加）。
+
+tmux 实机（同一会话含「thinking + 3 工具调用、无正文」与「thinking + 正文 + 2 工具调用」两轮）：
+
+- 启动（`--session` 恢复）：无正文那轮**没有** `Thinking...`，有正文那轮保留（符合既定规则）✓
+- `/reload`：同上，无正文那轮不再冒 `Thinking...` ✓（修复前必现）
+- `Ctrl+O` 展开重放块：被吸收的 thinking 以 dim 斜体渲染在对应工具行上方（`│   The user asks: …`），说明文本确实存到了 entry ✓
+- `/reload` 之后**新跑一轮**（无正文 + 2 工具）：live 照常折叠 ✓（修复前该路径同样失效）
+- `/tree` 导航后重建：仍是折叠态 ✓
