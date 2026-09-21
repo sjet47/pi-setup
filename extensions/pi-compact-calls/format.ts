@@ -5,7 +5,7 @@
  * `node --test` (see tests/).
  */
 
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "os";
 
 /** Theme access, injected so the helpers stay testable without a pi theme. */
@@ -16,8 +16,13 @@ export type Paint = {
 
 export const PLAIN_PAINT: Paint = { fg: (_color, text) => text, bold: (text) => text };
 
-/** Argument summary length. */
-export const SUMMARY_MAX_CHARS = 60;
+/**
+ * Sanity bound for a summary string. The visible length is decided later by the
+ * terminal width (see composeToolLine), not by this.
+ */
+export const SUMMARY_HARD_LIMIT = 240;
+/** An error tail narrower than this is not worth showing. */
+const MIN_ERROR_TAIL_WIDTH = 12;
 
 /** The slice of a tool entry the pure helpers need. */
 export type ToolView = {
@@ -49,7 +54,7 @@ export function shortenPath(path: string, home: string = homedir()): string {
 	return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
 }
 
-export function oneLine(value: unknown, max = SUMMARY_MAX_CHARS): string {
+export function oneLine(value: unknown, max = SUMMARY_HARD_LIMIT): string {
 	const text = String(value ?? "").replace(/\s+/g, " ").trim();
 	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
@@ -263,4 +268,58 @@ export function composeHeader(parts: HeaderParts, width: number, paint: Paint = 
 		const lowest = Math.min(...kept.map((part) => part.drop));
 		kept = kept.filter((part) => part.drop !== lowest);
 	}
+}
+
+/** Truncate plain (unstyled) text to `width` columns; wide characters are handled by pi-tui. */
+export function truncatePlain(text: string, width: number): string {
+	if (width <= 0) return "";
+	if (visibleWidth(text) <= width) return text;
+	// pi-tui wraps the ellipsis in SGR resets; the input has no styling to protect.
+	return truncateToWidth(text, width, "…").replaceAll("\x1b[0m", "");
+}
+
+export type ToolLineParts = {
+	rail: string;
+	icon: string;
+	iconColor: string;
+	name: string;
+	/** Plain text; it gets whatever width is left over. */
+	summary: string;
+	/** Already styled, e.g. "+3 −1" or "40 lines"; never truncated. */
+	stat?: string;
+	/** e.g. "3.0s"; never truncated. */
+	duration?: string;
+	/** Plain text, failed calls only; shares the leftover width with the summary. */
+	errorTail?: string;
+};
+
+/**
+ * Lay one tool line out for `width` columns. Rail, icon, name, stat and duration
+ * are reserved first, so the duration survives on a narrow terminal; the summary
+ * takes the remainder and is cut with "…". A failed call's error tail may use up
+ * to half of the remainder, or more when the summary is short.
+ */
+export function composeToolLine(parts: ToolLineParts, width: number, paint: Paint = PLAIN_PAINT): string {
+	const prefix =
+		paint.fg("dim", parts.rail) +
+		paint.fg(parts.iconColor, parts.icon) +
+		" " +
+		paint.fg("toolTitle", paint.bold(parts.name)) +
+		paint.fg("dim", ":") +
+		" ";
+	const suffix = (parts.stat ? ` ${parts.stat}` : "") + (parts.duration ? ` ${paint.fg("muted", `(${parts.duration})`)}` : "");
+	const room = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix));
+
+	const tailLead = " — ";
+	const tailWanted = parts.errorTail ? visibleWidth(tailLead) + visibleWidth(parts.errorTail) : 0;
+	let tailWidth = Math.min(tailWanted, Math.floor(room / 2));
+	if (tailWidth < MIN_ERROR_TAIL_WIDTH) tailWidth = 0;
+	const summary = truncatePlain(parts.summary, room - tailWidth);
+	if (tailWidth > 0) tailWidth = Math.min(tailWanted, room - visibleWidth(summary));
+
+	const tail =
+		tailWidth > 0
+			? paint.fg("dim", tailLead) + paint.fg("error", truncatePlain(parts.errorTail!, tailWidth - visibleWidth(tailLead)))
+			: "";
+	return prefix + paint.fg("dim", summary) + suffix + tail;
 }

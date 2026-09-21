@@ -60,6 +60,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import {
 	captureText,
 	composeHeader,
+	composeToolLine,
 	countLines,
 	type DiffStat,
 	diffStat,
@@ -363,21 +364,21 @@ function statOf(entry: ToolEntry): string {
 	return "";
 }
 
-function toolLine(rail: string, entry: ToolEntry, now: number): string {
+function toolLine(rail: string, entry: ToolEntry, now: number, contentWidth: number): string {
 	const { icon, color } = statusIcon(entry, now);
-	const duration = entryDuration(entry);
-	const stat = statOf(entry);
-	return (
-		fg("dim", rail) +
-		fg(color, icon) +
-		" " +
-		fg("toolTitle", bold(entry.name)) +
-		fg("dim", ":") +
-		" " +
-		fg("dim", summaryOf(entry.name, entry.args)) +
-		(stat ? ` ${stat}` : "") +
-		(duration ? ` ${fg("muted", `(${duration})`)}` : "") +
-		(toolState(entry) === "failed" && entry.errorTail ? ` ${fg("dim", "—")} ${fg("error", entry.errorTail)}` : "")
+	return composeToolLine(
+		{
+			rail,
+			icon,
+			iconColor: color,
+			name: entry.name,
+			summary: summaryOf(entry.name, entry.args),
+			stat: statOf(entry),
+			duration: entryDuration(entry),
+			errorTail: toolState(entry) === "failed" ? entry.errorTail : undefined,
+		},
+		contentWidth,
+		paint,
 	);
 }
 
@@ -471,7 +472,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const visible = group.expanded ? group.tools : [pickCollapsedTool(group.tools)];
 	visible.forEach((tool, index) => {
 		const rail = group.tools.length === 1 ? "" : index === visible.length - 1 ? RAIL_END : RAIL_MID;
-		lines.push(toolLine(rail, tool, now));
+		lines.push(toolLine(rail, tool, now, contentWidth));
 		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth));
 	});
 
@@ -483,7 +484,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 function renderSoloRow(entry: ToolEntry, width: number): string[] {
 	const now = Date.now();
 	const contentWidth = Math.max(1, width - INDENT.length);
-	const lines = [toolLine("", entry, now)];
+	const lines = [toolLine("", entry, now, contentWidth)];
 	if (entry.expanded) lines.push(...resultPreviewLines(entry, contentWidth));
 	if (entry.pending) ensureAnimation();
 	return lines.map((line) => INDENT + truncateToWidth(line, contentWidth, "…"));
