@@ -20,8 +20,10 @@
  *   native execute implementation — only presentation changes. (pi-compact-ui
  *   rebuilt the definition by hand and silently dropped all of that.)
  *
- * - Grouping uses a leader row: the first tool row of a group renders the whole
- *   block, every other member renders 0 lines. `renderShell: "self"` is required
+ * - A block = one run of consecutive tool calls (parallel batches and multi-step
+ *   batches alike), ended by visible assistant text, a new user turn, or a tool
+ *   that is not one of ours. Grouping uses a leader row: the first tool row of a
+ *   group renders the whole block, every other member renders 0 lines. `renderShell: "self"` is required
  *   for that — under the default shell an empty row still keeps
  *   ToolExecutionComponent's own `Spacer(1)`, i.e. one blank line per tool.
  *
@@ -330,6 +332,18 @@ function resultPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
 	return rows;
 }
 
+/**
+ * The single call shown while collapsed: the newest still-running call wins, and
+ * once the whole batch is done the last call in it.
+ */
+function pickCollapsedTool(tools: ToolEntry[]): ToolEntry {
+	for (let index = tools.length - 1; index >= 0; index--) {
+		const tool = tools[index]!;
+		if (tool.pending) return tool;
+	}
+	return tools[tools.length - 1]!;
+}
+
 function groupEndedAt(group: ToolGroup): number | undefined {
 	let end: number | undefined;
 	for (const tool of group.tools) {
@@ -356,9 +370,9 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 		);
 	}
 
-	// Collapsed shows only the most recent call: what matters while a batch runs is
-	// what is happening now, and the header already carries the total count.
-	const visible = group.expanded ? group.tools : group.tools.slice(-1);
+	// Collapsed shows exactly one call — the one still running if there is one,
+	// otherwise the most recent. The header carries the total count.
+	const visible = group.expanded ? group.tools : [pickCollapsedTool(group.tools)];
 	const hiddenCount = group.tools.length - visible.length;
 	visible.forEach((tool, index) => {
 		const isLastRow = index === visible.length - 1 && hiddenCount === 0;
@@ -475,13 +489,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", (event) => {
-		// A block covers exactly one assistant message — i.e. one batch of tool
-		// calls. `message_start(assistant)` is emitted before that message's content
-		// (and therefore before its tool rows exist / execute), while message_end
-		// arrives before execution starts and would split parallel batches apart.
-		// tool_result messages are skipped for the same reason.
-		const role = (event.message as any)?.role;
-		if (role === "assistant" || role === "user") closeGroup();
+		// Only a new user turn ends a block. Assistant messages do NOT: within one
+		// turn, every tool call that is not separated by visible prose belongs to the
+		// same block, which the single collapsed line keeps showing live.
+		if ((event.message as any)?.role === "user") closeGroup();
 	});
 
 	pi.on("message_update", (event) => {
