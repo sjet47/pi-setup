@@ -221,7 +221,12 @@ export default function (pi: ExtensionAPI) {
 		const delta = event.assistantMessageEvent;
 		const text = delta?.type === "text_delta" && delta.delta ? delta.delta.length : 0;
 		const thinking = delta?.type === "thinking_delta" && delta.delta ? delta.delta.length : 0;
-		const hasThinkingContent = (event.message.content ?? []).some((block) => block.type === "thinking");
+		// pi appends the thinking block before its first token arrives, so an empty
+		// block must not be mistaken for first content (it would report a TTFT of
+		// roughly the prefill time instead of the time to the first token).
+		const hasThinkingContent = (event.message.content ?? []).some(
+			(block) => block.type === "thinking" && block.thinking.length > 0,
+		);
 		if (text === 0 && thinking === 0 && !hasThinkingContent) return;
 
 		const now = Date.now();

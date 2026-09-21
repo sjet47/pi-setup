@@ -136,6 +136,73 @@ test("tracker folds a finished message into the run totals and freezes it", () =
 	assert.equal(second.outputTokens, 140); // 120 + 20
 });
 
+test("tracker reports tokens/s against upstream's 100ms window floor", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.beforeProviderRequest(T0);
+	tracker.messageStart(T0 + 10);
+	// First text delta defines the window start, so elapsed is the floor: 100
+	// characters / 0.1s = 1000 t/s (upstream clamps to 0.1s, not 0.05s).
+	tracker.messageDelta(T0 + 20, { text: 350 });
+	assert.equal(tracker.snapshot(T0 + 20)?.tps, 1000);
+});
+
+test("tracker finalizes tps with the reported count even right after a delta", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.beforeProviderRequest(T0);
+	tracker.messageStart(T0 + 10);
+	tracker.messageDelta(T0 + 1_000, { text: 350 });
+	const mid = tracker.snapshot(T0 + 1_000)?.tps;
+
+	// 10ms later the message ends with a much smaller reported count: the final
+	// sample must not be swallowed by the 80ms EMA throttle.
+	tracker.messageEnd(T0 + 1_010, { input: 100, output: 10 });
+	const done = tracker.snapshot(T0 + 1_010)?.tps;
+	assert.ok(typeof done === "number" && typeof mid === "number");
+	assert.ok(done < mid, `expected final ${done} < mid-flight ${mid}`);
+});
+
+test("tracker uses reported usage for display and tps alike", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.beforeProviderRequest(T0);
+	tracker.messageStart(T0 + 10);
+	// 350 characters (≈100 estimated tokens) but the provider reports 40.
+	tracker.messageDelta(T0 + 1_000, { text: 350, usage: { output: 40 } });
+	const s = tracker.snapshot(T0 + 1_000);
+	assert.ok(s);
+	assert.equal(s.outputTokens, 40, "display follows the reported count");
+	// Same numerator for tps: 40 over the 0.1s floor window. Using the estimate
+	// (100 tokens) would give 1000 here.
+	assert.equal(s.tps, 400);
+});
+
+test("tracker keeps estimates out of the run totals", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.messageStart(T0 + 10);
+	tracker.messageDelta(T0 + 1_000, { text: 350 });
+	// Aborted message: no usage at all.
+	tracker.messageEnd(T0 + 1_000, undefined);
+
+	// The frozen line still shows the estimate for this message…
+	assert.equal(tracker.snapshot(T0 + 2_000)?.outputTokens, 100);
+
+	// …but the next message starts from reported usage only.
+	tracker.messageStart(T0 + 3_000, { input: 10 });
+	tracker.messageDelta(T0 + 3_100, { text: 35 });
+	tracker.messageEnd(T0 + 3_200, { input: 10, output: 20 });
+	assert.equal(tracker.snapshot(T0 + 4_000)?.outputTokens, 20);
+	// The aborted message reported no input either, so the run total is just the
+	// second message's 10 — no silently accumulated guess.
+	assert.equal(tracker.snapshot(T0 + 4_000)?.inputTokens, 10);
+});
+
 test("tracker counts tools and keeps the numbers after the run ends", () => {
 	const tracker = new TpsTracker();
 	tracker.agentStart();
@@ -214,6 +281,14 @@ test("stats line needs the core segment before it reports anything", () => {
 	// A tool call alone is worth showing, with the TPS estimate still pending.
 	const toolOnly = snapshot({ tps: null, inputTokens: 0, inputKnown: false, outputTokens: 0, toolCount: 2, ttftMs: null, thinkTokens: null, llmDurationMs: null });
 	assert.equal(buildStatsLine(toolOnly, { showTtft: true, maxWidth: 100, color: plain }), "⚡… 🔧2");
+});
+
+test("stats line never degrades down to a lone placeholder", () => {
+	const toolOnly = snapshot({ tps: null, inputTokens: 0, inputKnown: false, outputTokens: 0, toolCount: 2, ttftMs: null, thinkTokens: null, llmDurationMs: null });
+	// Wide enough for the tool call…
+	assert.equal(buildStatsLine(toolOnly, { showTtft: true, maxWidth: 20, color: plain }), "⚡… 🔧2");
+	// …and narrow enough to force dropping it: give the slot back, don't show "⚡…".
+	assert.equal(buildStatsLine(toolOnly, { showTtft: true, maxWidth: 3, color: plain }), "");
 });
 
 test("stats line keeps output tokens when the input count is unknown", () => {

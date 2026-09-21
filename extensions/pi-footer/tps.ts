@@ -59,10 +59,12 @@ export interface TpsDelta {
 	usage?: TpsUsage;
 }
 
-// Tuning constants carried over from upstream.
+// Tuning constants carried over from upstream (upstream clamps the generation
+// window to 0.1s first, which makes its 0.05 clamp unreachable — 0.1 is the
+// effective floor).
 const REFRESH_MS = 80; // throttle for the EMA update
 const EMA_WEIGHT = 0.15;
-const MIN_ELAPSED_S = 0.05;
+const MIN_ELAPSED_S = 0.1;
 const THINK_CHARS_PER_TOKEN = 4;
 const TEXT_CHARS_PER_TOKEN = 3.5;
 
@@ -86,6 +88,9 @@ export class TpsTracker {
 	private msgStartInputTokens = 0;
 	private liveUsageInput = 0;
 	private liveUsageOutput = 0;
+	/** What the frozen (non-live) line shows after the run totals were updated. */
+	private msgDisplayInput = 0;
+	private msgDisplayOutput = 0;
 	private firstContentTime = 0;
 	private textStartTime = 0;
 	private streamedTextLen = 0;
@@ -110,6 +115,8 @@ export class TpsTracker {
 		this.msgStartInputTokens = 0;
 		this.liveUsageInput = 0;
 		this.liveUsageOutput = 0;
+		this.msgDisplayInput = 0;
+		this.msgDisplayOutput = 0;
 		this.firstContentTime = 0;
 		this.textStartTime = 0;
 		this.streamedTextLen = 0;
@@ -144,6 +151,8 @@ export class TpsTracker {
 		this.msgStartInputTokens = usage?.input ?? 0;
 		this.liveUsageInput = usage?.input ?? 0;
 		this.liveUsageOutput = usage?.output ?? 0;
+		this.msgDisplayInput = 0;
+		this.msgDisplayOutput = 0;
 		this.firstContentTime = 0;
 		this.textStartTime = 0;
 		this.streamedTextLen = 0;
@@ -165,7 +174,7 @@ export class TpsTracker {
 		if (this.firstContentTime === 0 && hasContent) this.firstContentTime = now;
 		if (this.textStartTime === 0 && (delta.text ?? 0) > 0) this.textStartTime = now;
 
-		this.refreshTps(now, this.estimateOutputTokens());
+		this.refreshTps(now, this.liveOutputTokens());
 	}
 
 	messageEnd(now: number, usage?: TpsUsage): void {
@@ -173,12 +182,18 @@ export class TpsTracker {
 		this.messageLive = false;
 		this.msgEndTime = now;
 
-		const output = usage?.output && usage.output > 0 ? usage.output : this.estimateOutputTokens();
-		// Re-smooth once with the exact token count (upstream does the same).
-		this.refreshTps(now, output);
+		// Display keeps the estimate when the provider reported nothing; the run
+		// totals only take reported usage (upstream behaves the same way, so an
+		// aborted message does not inflate the following messages).
+		const reportedOutput = usage?.output ?? 0;
+		const displayOutput = this.reportedOrEstimate(reportedOutput);
+		this.msgDisplayOutput = reportedOutput > 0 ? 0 : displayOutput;
+		this.msgDisplayInput = 0;
+		// Force the final sample past the throttle: this one carries the exact count.
+		this.refreshTps(now, displayOutput, true);
 
 		this.totalInput += Math.max(usage?.input ?? 0, this.msgStartInputTokens);
-		this.totalOutput += output;
+		this.totalOutput += reportedOutput;
 		this.liveUsageInput = 0;
 		this.liveUsageOutput = 0;
 	}
@@ -199,8 +214,10 @@ export class TpsTracker {
 		if (!this.hasRun) return null;
 
 		const live = this.messageLive;
-		const currentOutput = live ? Math.max(this.liveUsageOutput, this.estimateOutputTokens()) : 0;
-		const currentInput = live ? Math.max(this.liveUsageInput, this.msgStartInputTokens) : 0;
+		const currentOutput = live ? this.liveOutputTokens() : this.msgDisplayOutput;
+		const currentInput = live
+			? Math.max(this.liveUsageInput, this.msgStartInputTokens)
+			: this.msgDisplayInput;
 		const inputTokens = this.totalInput + currentInput;
 		const outputTokens = this.totalOutput + currentOutput;
 
@@ -226,14 +243,27 @@ export class TpsTracker {
 		return this.working;
 	}
 
-	private refreshTps(now: number, tokens: number): void {
+	private refreshTps(now: number, tokens: number, force = false): void {
 		if (tokens <= 0) return;
-		if (this.lastEmaAt > 0 && now - this.lastEmaAt < REFRESH_MS) return;
+		if (!force && this.lastEmaAt > 0 && now - this.lastEmaAt < REFRESH_MS) return;
 		this.lastEmaAt = now;
 
 		const elapsed = Math.max((now - this.generationStart()) / 1000, MIN_ELAPSED_S);
 		const raw = tokens / elapsed;
 		this.smoothedTps = this.smoothedTps === 0 ? raw : EMA_WEIGHT * raw + (1 - EMA_WEIGHT) * this.smoothedTps;
+	}
+
+	/**
+	 * Output tokens to show/smooth right now: reported usage wins (it is the exact
+	 * count), the character estimate is the fallback while streaming. Display and
+	 * TPS always use the same number.
+	 */
+	private liveOutputTokens(): number {
+		return this.reportedOrEstimate(this.liveUsageOutput);
+	}
+
+	private reportedOrEstimate(reported: number): number {
+		return reported > 0 ? reported : this.estimateOutputTokens();
 	}
 
 	/** TPS window: text generation > first content > message start. */
@@ -305,6 +335,9 @@ export interface StatsLineOptions {
 	color: StatsColor;
 }
 
+/** Shown while the first token is still pending, i.e. before a TPS estimate exists. */
+const CORE_PLACEHOLDER = "⚡…";
+
 /**
  * The stats line, already degraded to `maxWidth` (returns "" when even the
  * core segment does not fit). Segments keep a stable visual order; shrinking
@@ -322,7 +355,11 @@ export function buildStatsLine(s: TpsSnapshot, o: StatsLineOptions): string {
 		rendered = renderSegments(segments, o.color);
 	}
 
-	return rendered.width <= o.maxWidth ? rendered.text : "";
+	if (rendered.width > o.maxWidth) return "";
+	// Degrading all the way down to a lone placeholder leaves a border slot that
+	// says nothing — better to give the space back to the status/name.
+	if (segments.length === 1 && segments[0].parts[0].text === CORE_PLACEHOLDER) return "";
+	return rendered.text;
 }
 
 function statsSegments(s: TpsSnapshot, showTtft: boolean): StatsSegment[] {
@@ -335,7 +372,7 @@ function statsSegments(s: TpsSnapshot, showTtft: boolean): StatsSegment[] {
 	if (tokens.length === 0 && s.tps === null && s.toolCount === 0) return [];
 
 	const segments: StatsSegment[] = [
-		{ key: "core", parts: [{ role: "core", text: s.tps !== null ? `⚡${s.tps}t/s` : "⚡…" }] },
+		{ key: "core", parts: [{ role: "core", text: s.tps !== null ? `⚡${s.tps}t/s` : CORE_PLACEHOLDER }] },
 	];
 	if (tokens.length > 0) segments.push({ key: "tokens", parts: tokens });
 	if (s.toolCount > 0) segments.push({ key: "tools", parts: [{ role: "tools", text: `🔧${s.toolCount}` }] });
