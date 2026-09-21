@@ -60,11 +60,13 @@ export function oneLine(value: unknown, max = SUMMARY_HARD_LIMIT): string {
 }
 
 export function formatDuration(ms: number): string {
-	const totalSeconds = Math.max(0, ms) / 1000;
-	if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+	const clamped = Math.max(0, ms);
+	// Round once, then split: rounding a part on its own can yield "60.0s" / "1m 60s".
+	const tenths = Math.round(clamped / 100);
+	if (tenths < 600) return `${(tenths / 10).toFixed(1)}s`;
+	const totalSeconds = Math.round(clamped / 1000);
 	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = Math.round(totalSeconds % 60);
-	if (minutes < 60) return `${minutes}m ${seconds}s`;
+	if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
 	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
