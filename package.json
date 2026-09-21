@@ -27,6 +27,7 @@
       "./extensions/pi-wakatime/src/index.ts",
       "./extensions/pi-cache-graph/index.ts",
       "./extensions/pi-footer/index.ts",
+      "./extensions/pi-compact-calls/index.ts",
       "./extensions/pi-wordle/index.ts",
       "./extensions/pi-note/index.ts",
       "./extensions/pi-recap/src/index.ts"
