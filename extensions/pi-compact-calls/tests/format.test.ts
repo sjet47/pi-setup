@@ -255,6 +255,8 @@ test("composeToolLine: error tail shares the leftover width", () => {
 	const narrow = composeToolLine(parts, 64);
 	assert.ok(visibleWidth(narrow) <= 64);
 	assert.ok(narrow.includes("cd /nonexistent-dir-xyz (0.0s) — bash: cd:"));
+	// A short tail that fits whole is kept even though it is below the minimum width.
+	assert.equal(composeToolLine({ ...parts, summary: "false", errorTail: "exit 1" }, 64), "└ ✗ bash: false (0.0s) — exit 1");
 	// Too narrow for a useful tail: it is dropped, the rest stays intact.
 	const tiny = composeToolLine(parts, 30);
 	assert.ok(!tiny.includes("—"));

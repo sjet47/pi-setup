@@ -21,7 +21,7 @@ export const PLAIN_PAINT: Paint = { fg: (_color, text) => text, bold: (text) => 
  * terminal width (see composeToolLine), not by this.
  */
 export const SUMMARY_HARD_LIMIT = 240;
-/** An error tail narrower than this is not worth showing. */
+/** A truncated error tail narrower than this is not worth showing. */
 const MIN_ERROR_TAIL_WIDTH = 12;
 
 /** The slice of a tool entry the pure helpers need. */
@@ -355,7 +355,8 @@ export function composeToolLine(parts: ToolLineParts, width: number, paint: Pain
 	const tailLead = " — ";
 	const tailWanted = parts.errorTail ? visibleWidth(tailLead) + visibleWidth(parts.errorTail) : 0;
 	let tailWidth = Math.min(tailWanted, Math.floor(room / 2));
-	if (tailWidth < MIN_ERROR_TAIL_WIDTH) tailWidth = 0;
+	// A cut tail must stay readable; a short one that fits whole is always fine.
+	if (tailWidth < Math.min(MIN_ERROR_TAIL_WIDTH, tailWanted)) tailWidth = 0;
 	const summary = truncatePlain(parts.summary, room - tailWidth);
 	if (tailWidth > 0) tailWidth = Math.min(tailWanted, room - visibleWidth(summary));
 
