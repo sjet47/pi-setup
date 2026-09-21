@@ -39,6 +39,52 @@ export function shouldSealText(sealed: ReadonlySet<number>, contentIndex: number
 	return text.trim().length > 0 && !sealed.has(contentIndex);
 }
 
+/**
+ * Group the tool calls of a stored transcript into the blocks a live session would
+ * have folded them into: runs of consecutive built-in calls, broken by a new user
+ * turn, by visible assistant text, or by a call we do not own. Rows replayed from a
+ * session get no events, so the transcript is the only source of their grouping.
+ *
+ * Content is walked in order, which is the order the live path sees it: text in the
+ * middle of a message seals the block that the calls before it joined. Foreign
+ * calls only break the block — they render natively, so they are not returned.
+ *
+ * Returns the tool call ids of each block, in transcript order.
+ */
+export function replayGroups(messages: readonly any[], isBuiltin: (toolName: string) => boolean): string[][] {
+	const blocks: string[][] = [];
+	let current: string[] | null = null;
+	const seal = () => {
+		if (current && current.length > 0) blocks.push(current);
+		current = null;
+	};
+	for (const message of messages) {
+		const role = message?.role;
+		// Tool results only carry the outcome of a call the transcript already accounted for.
+		if (role === "toolResult") continue;
+		if (role !== "assistant") {
+			seal(); // user turn, custom message, compaction or branch summary
+			continue;
+		}
+		const content = Array.isArray(message.content) ? message.content : [];
+		for (const item of content) {
+			if (item?.type === "text" && String(item.text ?? "").trim()) {
+				seal();
+				continue;
+			}
+			if (item?.type !== "toolCall" || typeof item.id !== "string") continue;
+			if (!isBuiltin(String(item.name ?? ""))) {
+				seal();
+				continue;
+			}
+			current ??= [];
+			current.push(item.id);
+		}
+	}
+	seal();
+	return blocks;
+}
+
 /** The slice of an assistant message content item the thinking fold needs. */
 export type ContentItem = { type?: string; [key: string]: any };
 
@@ -359,7 +405,8 @@ export type HeaderParts = {
 	icon: string;
 	count: number;
 	failed: number;
-	durationMs: number;
+	/** Omitted when no timing is known (a replayed block): the line then shows no duration. */
+	durationMs?: number;
 	/** e.g. "4 read, 2 grep, 1 bash"; shown in parentheses after the count. */
 	breakdown?: string;
 	/** Dim trailing hint, e.g. "Ctrl+O to expand" (collapsed blocks only). */
@@ -405,7 +452,7 @@ export function composeHeader(parts: HeaderParts, width: number, paint: Paint = 
 	const optional: { text: string; drop: number }[] = [];
 	if (parts.breakdown) optional.push({ text: ` ${paint.fg("dim", `(${parts.breakdown})`)}`, drop: 1 });
 	if (parts.failed > 0) optional.push({ text: failedText, drop: 3 });
-	optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 2 });
+	if (parts.durationMs !== undefined) optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 2 });
 
 	let kept = optional;
 	let line: string;

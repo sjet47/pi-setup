@@ -76,8 +76,10 @@
  *   prose keep the native row. This is the only patch in the extension.
  *
  * - Replayed history (resume, tree navigation, /reload) produces no
- *   tool_execution_* events, so those rows cannot be grouped; they render as a
- *   single compact line instead of the native multi-line block.
+ *   tool_execution_* events, so those rows cannot be grouped from events. Their
+ *   blocks are derived from the session's stored messages instead (replayGroups),
+ *   which makes stored batches fold into their stat line just like live ones, and
+ *   gets recomputed on session_start / session_tree / session_compact.
  */
 
 import {
@@ -92,6 +94,7 @@ import {
 	type ExtensionContext,
 	type Theme,
 	renderDiff,
+	sessionEntryToContextMessages,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -110,6 +113,7 @@ import {
 	type Paint,
 	pickCollapsedTool,
 	previewModeOf,
+	replayGroups,
 	selectPreview,
 	shouldSealText,
 	summaryOf,
@@ -203,6 +207,11 @@ type ToolGroup = {
 	/** Ctrl+O state, driven by the leader row. */
 	expanded: boolean;
 	closed: boolean;
+	/** Derived from a stored transcript: it has no execution timing to report. */
+	replay: boolean;
+	/** Tool call ids in transcript order (replay groups only): rows attach in whatever
+	 * order they are created, and the first one is the leader, so the order is restored. */
+	order?: string[];
 	tools: ToolEntry[];
 };
 
@@ -220,6 +229,12 @@ const sealedTextIndexes = new Set<number>();
  * it never paints as a solo row that vanishes once execution starts.
  */
 let live = false;
+/**
+ * Blocks derived from the session's stored messages, keyed by tool call id: the
+ * grouping for rows that are replayed instead of streamed. Undefined until a
+ * session's transcript has been read (see regroupFromSession).
+ */
+let replaySpec: Map<string, ToolGroup> | undefined;
 /** Latest theme seen by a renderer (pi has no theme-change event). */
 let currentTheme: Theme | undefined;
 /** `context.invalidate()` of some live row — repaint without capturing the TUI. */
@@ -231,14 +246,54 @@ function resetState(): void {
 	entries.clear();
 	sealedTextIndexes.clear();
 	currentGroup = null;
+	replaySpec = undefined;
 	live = false;
-	repaint = undefined;
+	// `repaint` is deliberately kept: it is only a way to ask pi for a frame, and the
+	// next session may need one before any of its rows has called renderCall.
+}
+
+/**
+ * Re-derive the block structure of the transcript. Rows replayed from a stored
+ * session produce no tool events, so their grouping comes from the session's own
+ * messages instead, and it has to be recomputed whenever that transcript can have
+ * changed underneath us (/reload, /tree, compaction).
+ */
+function regroupFromSession(ctx: ExtensionContext): void {
+	stopAnimation();
+	sealedTextIndexes.clear();
+	currentGroup = null;
+	live = false;
+	for (const entry of entries.values()) entry.group = undefined;
+	replaySpec = buildReplaySpec(ctx);
+	// Rows may already exist (pi restores the chat before session_start on /reload), so
+	// ask for a frame: ones that predate this grouping attach to it while rendering.
+	repaint?.();
+}
+
+/** Group the session's stored tool calls into the blocks they were live in. */
+function buildReplaySpec(ctx: ExtensionContext): Map<string, ToolGroup> | undefined {
+	try {
+		const messages = ctx.sessionManager
+			.buildContextEntries()
+			.flatMap((entry) => sessionEntryToContextMessages(entry));
+		const spec = new Map<string, ToolGroup>();
+		for (const ids of replayGroups(messages, (toolName) => BUILTIN_TOOL_NAMES.has(toolName))) {
+			// Stored blocks are finished by definition, so they render as their stat line.
+			const group: ToolGroup = { expanded: false, closed: true, replay: true, order: ids, tools: [] };
+			for (const id of ids) spec.set(id, group);
+		}
+		return spec;
+	} catch {
+		// An unreadable session shape must not break rendering: rows stay standalone lines.
+		return undefined;
+	}
 }
 
 function openGroup(): ToolGroup {
 	const group: ToolGroup = {
 		expanded: false,
 		closed: false,
+		replay: false,
 		tools: [],
 	};
 	currentGroup = group;
@@ -309,9 +364,29 @@ function ensureEntry(toolCallId: string, name: string, args: any): ToolEntry {
 function joinGroup(entry: ToolEntry): void {
 	if (entry.group) return;
 	const group = currentGroup ?? openGroup();
+	addToGroup(group, entry);
+}
+
+function addToGroup(group: ToolGroup, entry: ToolEntry): void {
 	group.tools.push(entry);
 	entry.group = group;
 	if (entry.expanded) group.expanded = true;
+	// Rows may attach in any order (a repaint can invalidate one of them before the
+	// frame that attaches the rest), so a replayed group restores its transcript order.
+	if (group.order) group.tools.sort((a, b) => group.order!.indexOf(a.toolCallId) - group.order!.indexOf(b.toolCallId));
+}
+
+/**
+ * Put a row replayed from a stored session into the block that transcript puts it
+ * in, and report whether it joined one. Rows that come back with a session produce
+ * no tool events at all, so their grouping is derived offline from the session's
+ * messages (see replayGroups) — recomputed whenever the transcript can have changed.
+ */
+function attachReplayGroup(entry: ToolEntry): boolean {
+	const group = replaySpec?.get(entry.toolCallId);
+	if (!group || entry.group) return false;
+	addToGroup(group, entry);
+	return true;
 }
 
 function isLeader(entry: ToolEntry): boolean {
@@ -554,7 +629,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 				icon,
 				count: group.tools.length,
 				failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
-				durationMs: unionDuration(intervals, now),
+				durationMs: group.replay ? undefined : unionDuration(intervals, now),
 				breakdown: typeBreakdown(group.tools.map((tool) => tool.name)) || undefined,
 				hint,
 				errorTail,
@@ -611,6 +686,10 @@ class RowComponent implements Component {
 	constructor(readonly entry: ToolEntry) {}
 
 	render(width: number): string[] {
+		// A row that was created before its grouping was known — pi restores the chat
+		// before session_start on /reload — joins its block here, then asks for one more
+		// frame so the leader re-renders with the full member list.
+		if (!this.entry.group && attachReplayGroup(this.entry)) repaint?.();
 		if (!this.entry.group) return renderSoloRow(this.entry, width);
 		// Exactly one row per group paints the block; the rest render 0 lines.
 		if (!isLeader(this.entry)) return [];
@@ -732,9 +811,10 @@ export default function (pi: ExtensionAPI) {
 				repaint = context.invalidate;
 				const entry = ensureEntry(context.toolCallId, name, args);
 				entry.expanded = context.expanded;
-				// Join while the args are still streaming; pending/startedAt stay
-				// untouched until tool_execution_start says the call really runs.
-				if (live && !entry.hasResult) joinGroup(entry);
+				// Join while the args are still streaming; pending/startedAt stay untouched
+				// until tool_execution_start says the call really runs. A row that belongs to
+				// a stored transcript joins the block that transcript puts it in instead.
+				if (!entry.group && !attachReplayGroup(entry) && live && !entry.hasResult) joinGroup(entry);
 				if (isLeader(entry)) entry.group!.expanded = context.expanded;
 				entry.row ??= new RowComponent(entry);
 				return entry.row;
@@ -765,11 +845,23 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		currentTheme = ctx.ui.theme;
-		resetState();
+		// Entries and rows may already exist: a /reload restores the chat *before* this
+		// event. Keep them, only re-derive the block structure they belong to.
+		regroupFromSession(ctx);
 	});
 
 	pi.on("session_shutdown", () => {
 		resetState();
+	});
+
+	// Both rebuild the transcript (and the chat with it): the blocks derived from it,
+	// and the one still being collected, no longer match what is on screen.
+	pi.on("session_tree", (_event, ctx) => {
+		regroupFromSession(ctx);
+	});
+
+	pi.on("session_compact", (_event, ctx) => {
+		regroupFromSession(ctx);
 	});
 
 	pi.on("message_start", (event) => {
