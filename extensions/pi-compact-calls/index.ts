@@ -1,13 +1,23 @@
 /**
  * pi-compact-calls — fold consecutive built-in tool calls into one compact block.
  *
- * A live turn renders as two lines while collapsed:
+ * A block is a run of consecutive built-in tool calls. While it runs, the collapsed
+ * block is two lines — the header plus the call in progress:
  *
  *   ⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
  *   └ ⠋ bash: sleep 3 && echo one (3.0s)
  *
- * and, after Ctrl+O, as one row per tool with a result preview (bash: last
- * lines, edit: its diff, everything else: first lines):
+ * Once every call of the batch is done (the block is closed and nothing is running)
+ * the activity line goes away and only the header — the block's stat line — is left:
+ *
+ *   ✓ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
+ *
+ * A failure keeps its tail there, since that line is then the only trace of the run:
+ *
+ *   ✗ 3 tool calls (2 bash, 1 edit) · 1 failed · 3.0s — cd: /nope: No such file or directory (exit 1) · Ctrl+O to expand
+ *
+ * After Ctrl+O either kind shows one row per tool with a result preview (bash:
+ * last lines, edit: its diff, everything else: first lines):
  *
  *   ✗ 3 tool calls (2 bash, 1 edit) · 1 failed · 3.0s
  *   ├ ✓ bash: sleep 3 && echo one (3.0s)
@@ -66,8 +76,10 @@
  *   prose keep the native row. This is the only patch in the extension.
  *
  * - Replayed history (resume, tree navigation, /reload) produces no
- *   tool_execution_* events, so those rows cannot be grouped; they render as a
- *   single compact line instead of the native multi-line block.
+ *   tool_execution_* events, so those rows cannot be grouped from events. Their
+ *   blocks are derived from the session's stored messages instead (replayGroups),
+ *   which makes stored batches fold into their stat line just like live ones, and
+ *   gets recomputed on session_start / session_tree / session_compact.
  */
 
 import {
@@ -82,6 +94,7 @@ import {
 	type ExtensionContext,
 	type Theme,
 	renderDiff,
+	sessionEntryToContextMessages,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -100,6 +113,7 @@ import {
 	type Paint,
 	pickCollapsedTool,
 	previewModeOf,
+	replayGroups,
 	selectPreview,
 	shouldSealText,
 	summaryOf,
@@ -193,6 +207,11 @@ type ToolGroup = {
 	/** Ctrl+O state, driven by the leader row. */
 	expanded: boolean;
 	closed: boolean;
+	/** Derived from a stored transcript: it has no execution timing to report. */
+	replay: boolean;
+	/** Tool call ids in transcript order (replay groups only): rows attach in whatever
+	 * order they are created, and the first one is the leader, so the order is restored. */
+	order?: string[];
 	tools: ToolEntry[];
 };
 
@@ -210,6 +229,12 @@ const sealedTextIndexes = new Set<number>();
  * it never paints as a solo row that vanishes once execution starts.
  */
 let live = false;
+/**
+ * Blocks derived from the session's stored messages, keyed by tool call id: the
+ * grouping for rows that are replayed instead of streamed. Undefined until a
+ * session's transcript has been read (see regroupFromSession).
+ */
+let replaySpec: Map<string, ToolGroup> | undefined;
 /** Latest theme seen by a renderer (pi has no theme-change event). */
 let currentTheme: Theme | undefined;
 /** `context.invalidate()` of some live row — repaint without capturing the TUI. */
@@ -221,14 +246,54 @@ function resetState(): void {
 	entries.clear();
 	sealedTextIndexes.clear();
 	currentGroup = null;
+	replaySpec = undefined;
 	live = false;
-	repaint = undefined;
+	// `repaint` is deliberately kept: it is only a way to ask pi for a frame, and the
+	// next session may need one before any of its rows has called renderCall.
+}
+
+/**
+ * Re-derive the block structure of the transcript. Rows replayed from a stored
+ * session produce no tool events, so their grouping comes from the session's own
+ * messages instead, and it has to be recomputed whenever that transcript can have
+ * changed underneath us (/reload, /tree, compaction).
+ */
+function regroupFromSession(ctx: ExtensionContext): void {
+	stopAnimation();
+	sealedTextIndexes.clear();
+	currentGroup = null;
+	live = false;
+	for (const entry of entries.values()) entry.group = undefined;
+	replaySpec = buildReplaySpec(ctx);
+	// Rows may already exist (pi restores the chat before session_start on /reload), so
+	// ask for a frame: ones that predate this grouping attach to it while rendering.
+	repaint?.();
+}
+
+/** Group the session's stored tool calls into the blocks they were live in. */
+function buildReplaySpec(ctx: ExtensionContext): Map<string, ToolGroup> | undefined {
+	try {
+		const messages = ctx.sessionManager
+			.buildContextEntries()
+			.flatMap((entry) => sessionEntryToContextMessages(entry));
+		const spec = new Map<string, ToolGroup>();
+		for (const ids of replayGroups(messages, (toolName) => BUILTIN_TOOL_NAMES.has(toolName))) {
+			// Stored blocks are finished by definition, so they render as their stat line.
+			const group: ToolGroup = { expanded: false, closed: true, replay: true, order: ids, tools: [] };
+			for (const id of ids) spec.set(id, group);
+		}
+		return spec;
+	} catch {
+		// An unreadable session shape must not break rendering: rows stay standalone lines.
+		return undefined;
+	}
 }
 
 function openGroup(): ToolGroup {
 	const group: ToolGroup = {
 		expanded: false,
 		closed: false,
+		replay: false,
 		tools: [],
 	};
 	currentGroup = group;
@@ -299,9 +364,29 @@ function ensureEntry(toolCallId: string, name: string, args: any): ToolEntry {
 function joinGroup(entry: ToolEntry): void {
 	if (entry.group) return;
 	const group = currentGroup ?? openGroup();
+	addToGroup(group, entry);
+}
+
+function addToGroup(group: ToolGroup, entry: ToolEntry): void {
 	group.tools.push(entry);
 	entry.group = group;
 	if (entry.expanded) group.expanded = true;
+	// Rows may attach in any order (a repaint can invalidate one of them before the
+	// frame that attaches the rest), so a replayed group restores its transcript order.
+	if (group.order) group.tools.sort((a, b) => group.order!.indexOf(a.toolCallId) - group.order!.indexOf(b.toolCallId));
+}
+
+/**
+ * Put a row replayed from a stored session into the block that transcript puts it
+ * in, and report whether it joined one. Rows that come back with a session produce
+ * no tool events at all, so their grouping is derived offline from the session's
+ * messages (see replayGroups) — recomputed whenever the transcript can have changed.
+ */
+function attachReplayGroup(entry: ToolEntry): boolean {
+	const group = replaySpec?.get(entry.toolCallId);
+	if (!group || entry.group) return false;
+	addToGroup(group, entry);
+	return true;
 }
 
 function isLeader(entry: ToolEntry): boolean {
@@ -514,41 +599,65 @@ function headerIcon(state: ReturnType<typeof headerState>, now: number): string 
 	}
 }
 
+/** Error tail of the most recent failed call, for a collapsed block's stat line. */
+function collapsedErrorTail(tools: readonly ToolEntry[]): string | undefined {
+	for (let index = tools.length - 1; index >= 0; index -= 1) {
+		const tool = tools[index]!;
+		if (toolState(tool) === "failed" && tool.errorTail) return tool.errorTail;
+	}
+	return undefined;
+}
+
 function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const now = Date.now();
 	const state = headerState(group.tools, group.closed);
 	const contentWidth = Math.max(1, width - INDENT.length);
-
-	// A single tool needs no header: the tool line already carries state, summary
-	// and duration. Only batches show the “N tool calls · total” summary.
-	const lines: string[] = [];
-	if (group.tools.length > 1) {
-		// Pure tool time: the union of the execution intervals, so parallel calls do
-		// not double count and the model's thinking time between calls is left out.
-		const intervals = group.tools
-			.filter((tool) => tool.startedAt !== undefined)
-			.map((tool) => ({ start: tool.startedAt!, end: tool.endedAt }));
-		lines.push(
-			composeHeader(
-				{
-					state,
-					icon: headerIcon(state, now),
-					count: group.tools.length,
-					failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
-					durationMs: unionDuration(intervals, now),
-					breakdown: typeBreakdown(group.tools.map((tool) => tool.name)) || undefined,
-					hint: group.expanded ? undefined : EXPAND_HINT,
-				},
-				contentWidth,
-				paint,
-			),
+	const multi = group.tools.length > 1;
+	// Nothing left to watch: the batch ran to completion, so the activity line goes
+	// away and the header alone stays. A group closed while a call was still running
+	// (abort) is not settled — the running call stays visible.
+	const settled = group.closed && state !== "running";
+	// Pure tool time: the union of the execution intervals, so parallel calls do not
+	// double count and the model's thinking time between calls is left out.
+	const intervals = group.tools
+		.filter((tool) => tool.startedAt !== undefined)
+		.map((tool) => ({ start: tool.startedAt!, end: tool.endedAt }));
+	const headerLine = (icon: string, hint?: string, errorTail?: string) =>
+		composeHeader(
+			{
+				state,
+				icon,
+				count: group.tools.length,
+				failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
+				durationMs: group.replay ? undefined : unionDuration(intervals, now),
+				breakdown: typeBreakdown(group.tools.map((tool) => tool.name)) || undefined,
+				hint,
+				errorTail,
+			},
+			contentWidth,
+			paint,
 		);
+
+	// A single tool needs no header: the tool line already carries state, summary and
+	// duration. A collapsed multi-tool block is the header plus the call in progress
+	// while it runs — and, once the batch is done, the header alone.
+	const lines: string[] = [];
+	let visible: readonly ToolEntry[] = [];
+	if (group.expanded) {
+		visible = group.tools;
+		if (multi) lines.push(headerLine(headerIcon(state, now)));
+	} else if (!multi) {
+		visible = group.tools.slice(0, 1);
+	} else if (!settled) {
+		// The call still running, else the most recent failure, else the last call.
+		visible = [pickCollapsedTool(group.tools)];
+		lines.push(headerLine(headerIcon(state, now), EXPAND_HINT));
+	} else {
+		// Done: the header line is all that is left of the batch, so it carries what the
+		// block did (`1 failed`) and why it failed (the error tail).
+		lines.push(headerLine(headerIcon(state, now), EXPAND_HINT, collapsedErrorTail(group.tools)));
 	}
 
-	// Collapsed = header + one activity line: the call still running if there is
-	// one, else the most recent failure, else the last call. The header carries
-	// the total count and the expand hint. A single-tool block is just its line.
-	const visible = group.expanded ? group.tools : [pickCollapsedTool(group.tools)];
 	visible.forEach((tool, index) => {
 		const isLast = index === visible.length - 1;
 		const rail = group.tools.length === 1 ? "" : isLast ? RAIL_END : RAIL_MID;
@@ -577,6 +686,10 @@ class RowComponent implements Component {
 	constructor(readonly entry: ToolEntry) {}
 
 	render(width: number): string[] {
+		// A row that was created before its grouping was known — pi restores the chat
+		// before session_start on /reload — joins its block here, then asks for one more
+		// frame so the leader re-renders with the full member list.
+		if (!this.entry.group && attachReplayGroup(this.entry)) repaint?.();
 		if (!this.entry.group) return renderSoloRow(this.entry, width);
 		// Exactly one row per group paints the block; the rest render 0 lines.
 		if (!isLeader(this.entry)) return [];
@@ -698,9 +811,10 @@ export default function (pi: ExtensionAPI) {
 				repaint = context.invalidate;
 				const entry = ensureEntry(context.toolCallId, name, args);
 				entry.expanded = context.expanded;
-				// Join while the args are still streaming; pending/startedAt stay
-				// untouched until tool_execution_start says the call really runs.
-				if (live && !entry.hasResult) joinGroup(entry);
+				// Join while the args are still streaming; pending/startedAt stay untouched
+				// until tool_execution_start says the call really runs. A row that belongs to
+				// a stored transcript joins the block that transcript puts it in instead.
+				if (!entry.group && !attachReplayGroup(entry) && live && !entry.hasResult) joinGroup(entry);
 				if (isLeader(entry)) entry.group!.expanded = context.expanded;
 				entry.row ??= new RowComponent(entry);
 				return entry.row;
@@ -731,11 +845,23 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		currentTheme = ctx.ui.theme;
-		resetState();
+		// Entries and rows may already exist: a /reload restores the chat *before* this
+		// event. Keep them, only re-derive the block structure they belong to.
+		regroupFromSession(ctx);
 	});
 
 	pi.on("session_shutdown", () => {
 		resetState();
+	});
+
+	// Both rebuild the transcript (and the chat with it): the blocks derived from it,
+	// and the one still being collected, no longer match what is on screen.
+	pi.on("session_tree", (_event, ctx) => {
+		regroupFromSession(ctx);
+	});
+
+	pi.on("session_compact", (_event, ctx) => {
+		regroupFromSession(ctx);
 	});
 
 	pi.on("message_start", (event) => {
