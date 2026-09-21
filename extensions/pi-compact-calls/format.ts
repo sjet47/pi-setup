@@ -91,3 +91,27 @@ export function pickCollapsedTool<T extends ToolView>(tools: readonly T[]): T {
 	}
 	return tools[tools.length - 1]!;
 }
+
+export type DiffStat = { added: number; removed: number };
+
+/**
+ * Count changed lines in pi's display-oriented edit diff (`EditToolDetails.diff`):
+ * every line is `+<num> text`, `-<num> text` or ` <num> text`, without file headers.
+ */
+export function diffStat(diff: string): DiffStat {
+	let added = 0;
+	let removed = 0;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("+")) added++;
+		else if (line.startsWith("-")) removed++;
+	}
+	return { added, removed };
+}
+
+/** Lines in a written file; a trailing newline does not start another line. */
+export function countLines(content: unknown): number {
+	const text = typeof content === "string" ? content : "";
+	if (text.length === 0) return 0;
+	const breaks = text.split("\n").length - 1;
+	return text.endsWith("\n") ? breaks : breaks + 1;
+}

@@ -52,19 +52,32 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type Theme,
+	renderDiff,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
-import { formatDuration, pickCollapsedTool, summaryOf, toolState } from "./format.ts";
+import {
+	countLines,
+	type DiffStat,
+	diffStat,
+	formatDuration,
+	pickCollapsedTool,
+	summaryOf,
+	toolState,
+} from "./format.ts";
 
 // =============================================================================
 // Tunables
 // =============================================================================
 /** Result lines shown per tool when the block is expanded (Ctrl+O). */
 const EXPANDED_RESULT_LINES = 5;
+/** Diff lines shown for an edit when the block is expanded. */
+const EXPANDED_DIFF_LINES = 20;
 /** Keep at most this much result text per tool in memory (for previews). */
 const RESULT_TEXT_LIMIT = 4000;
+/** Same bound for the edit diff kept for the expanded view. */
+const DIFF_TEXT_LIMIT = 8000;
 const SPINNER_MS = 100;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /** One leading space, matching tool rows rendered in pi's default shell (Box paddingX = 1). */
@@ -99,6 +112,11 @@ type ToolEntry = {
 	startedAt?: number;
 	endedAt?: number;
 	resultText: string;
+	/** edit only: `details.diff`, cut to whole lines within DIFF_TEXT_LIMIT. */
+	diff?: string;
+	/** edit only: counted on the full diff before it was cut. */
+	diffStat?: DiffStat;
+	diffLineCount?: number;
 	isError: boolean;
 	/** Executing right now; set by tool_execution_start only, never by a renderer. */
 	pending: boolean;
@@ -272,6 +290,21 @@ function resultTextOf(result: any): string {
 	return text.length > RESULT_TEXT_LIMIT ? text.slice(0, RESULT_TEXT_LIMIT) : text;
 }
 
+/** Remember an edit's diff (bounded) plus the stats of the full diff. */
+function captureDetails(entry: ToolEntry, result: any): void {
+	const diff = result?.details?.diff;
+	if (entry.name !== "edit" || typeof diff !== "string" || diff.length === 0) return;
+	entry.diffStat = diffStat(diff);
+	entry.diffLineCount = diff.split("\n").length;
+	if (diff.length <= DIFF_TEXT_LIMIT) {
+		entry.diff = diff;
+	} else {
+		const cut = diff.slice(0, DIFF_TEXT_LIMIT);
+		const lastBreak = cut.lastIndexOf("\n");
+		entry.diff = lastBreak > 0 ? cut.slice(0, lastBreak) : cut;
+	}
+}
+
 function spinnerFrame(now: number): string {
 	return SPINNER_FRAMES[Math.floor(now / SPINNER_MS) % SPINNER_FRAMES.length]!;
 }
@@ -300,9 +333,22 @@ function bold(text: string): string {
 	return currentTheme ? currentTheme.bold(text) : text;
 }
 
+/** `+N −M` for an edit, `N lines` for a write; empty for everything else. */
+function statOf(entry: ToolEntry): string {
+	if (entry.name === "edit" && entry.diffStat) {
+		return `${fg("toolDiffAdded", `+${entry.diffStat.added}`)} ${fg("toolDiffRemoved", `−${entry.diffStat.removed}`)}`;
+	}
+	if (entry.name === "write" && typeof entry.args?.content === "string") {
+		const lines = countLines(entry.args.content);
+		return fg("muted", `${lines} line${lines === 1 ? "" : "s"}`);
+	}
+	return "";
+}
+
 function toolLine(rail: string, entry: ToolEntry, now: number): string {
 	const { icon, color } = statusIcon(entry, now);
 	const duration = entryDuration(entry);
+	const stat = statOf(entry);
 	return (
 		fg("dim", rail) +
 		fg(color, icon) +
@@ -311,12 +357,38 @@ function toolLine(rail: string, entry: ToolEntry, now: number): string {
 		fg("dim", ":") +
 		" " +
 		fg("dim", summaryOf(entry.name, entry.args)) +
+		(stat ? ` ${stat}` : "") +
 		(duration ? ` ${fg("muted", `(${duration})`)}` : "")
 	);
 }
 
+/** pi's own diff renderer (intra-line highlights); plain theme colors if it is unavailable. */
+function colorDiff(diffText: string): string[] {
+	try {
+		return renderDiff(diffText).split("\n");
+	} catch {
+		return diffText.split("\n").map((line) =>
+			fg(line.startsWith("+") ? "toolDiffAdded" : line.startsWith("-") ? "toolDiffRemoved" : "toolDiffContext", line),
+		);
+	}
+}
+
+/** An edit shows its diff instead of the "Successfully replaced…" text. */
+function diffPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
+	const shown = entry.diff!.split("\n").slice(0, EXPANDED_DIFF_LINES);
+	const total = Math.max(entry.diffLineCount ?? shown.length, shown.length);
+	const rows = colorDiff(shown.join("\n")).map(
+		(line) => fg("dim", SUB_INDENT) + truncateToWidth(line, Math.max(1, contentWidth - SUB_INDENT.length), "…"),
+	);
+	if (total > shown.length) {
+		rows.push(`${fg("dim", SUB_INDENT)}${fg("muted", `… ${total - shown.length} more lines`)}`);
+	}
+	return rows;
+}
+
 /** Result preview rows for an expanded block (live output included while running). */
 function resultPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
+	if (entry.diff && !entry.isError) return diffPreviewLines(entry, contentWidth);
 	if (!entry.resultText) return [];
 	const allLines = entry.resultText.split("\n");
 	const lines = allLines.slice(0, EXPANDED_RESULT_LINES);
@@ -453,6 +525,7 @@ export default function (pi: ExtensionAPI) {
 				const entry = entries.get(context.toolCallId);
 				if (entry) {
 					entry.resultText = resultTextOf(result);
+					captureDetails(entry, result);
 					// NOTE: the object passed to renderResult only carries content/details —
 					// `result.isError` is undefined here and would clobber the flag set by
 					// tool_execution_end. context.isError mirrors the row's real state and
@@ -526,6 +599,7 @@ export default function (pi: ExtensionAPI) {
 		entry.endedAt = Date.now();
 		entry.isError = Boolean(event.isError);
 		entry.resultText = resultTextOf(event.result);
+		captureDetails(entry, event.result);
 		if (!hasPendingTool()) stopAnimation();
 		repaint?.();
 	});
