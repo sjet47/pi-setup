@@ -14,9 +14,27 @@ export const SUMMARY_MAX_CHARS = 60;
 export type ToolView = {
 	name: string;
 	args: any;
+	/** Executing right now (between tool_execution_start and its end). */
 	pending: boolean;
+	/** A final result exists (live end event, or a replayed history row). */
+	hasResult: boolean;
 	isError: boolean;
 };
+
+/**
+ * - queued:  the call is known (args streaming / waiting for its turn) but has
+ *            neither started nor produced a result; also where calls that never
+ *            ran (abort) end up.
+ * - running: between tool_execution_start and tool_execution_end.
+ * - ok / failed: a final result exists.
+ */
+export type ToolState = "queued" | "running" | "ok" | "failed";
+
+export function toolState(tool: ToolView): ToolState {
+	if (tool.pending) return "running";
+	if (tool.hasResult) return tool.isError ? "failed" : "ok";
+	return "queued";
+}
 
 export function shortenPath(path: string, home: string = homedir()): string {
 	return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;

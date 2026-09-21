@@ -56,7 +56,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
-import { formatDuration, pickCollapsedTool, summaryOf } from "./format.ts";
+import { formatDuration, pickCollapsedTool, summaryOf, toolState } from "./format.ts";
 
 // =============================================================================
 // Tunables
@@ -68,6 +68,8 @@ const RESULT_TEXT_LIMIT = 4000;
 const SPINNER_MS = 100;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /** One leading space, matching tool rows rendered in pi's default shell (Box paddingX = 1). */
+/** A call that has neither started nor produced a result (args streaming, waiting, or never ran). */
+const QUEUED_ICON = "○";
 const INDENT = " ";
 const SUB_INDENT = "    ";
 const RAIL_MID = "├ ";
@@ -98,10 +100,13 @@ type ToolEntry = {
 	endedAt?: number;
 	resultText: string;
 	isError: boolean;
+	/** Executing right now; set by tool_execution_start only, never by a renderer. */
 	pending: boolean;
+	/** A final result exists (tool_execution_end, or a non-partial renderResult — replayed rows included). */
+	hasResult: boolean;
 	/** Mirrors pi's Ctrl+O (app.tools.expand) state as seen by this row. */
 	expanded: boolean;
-	/** Assigned when the tool joins a live group; undefined ⇒ render as a standalone compact row. */
+	/** Assigned when the tool joins a live group; undefined ⇒ render as a standalone compact row (replayed history). */
 	group?: ToolGroup;
 	row?: Component;
 };
@@ -119,6 +124,12 @@ type ToolGroup = {
 const entries = new Map<string, ToolEntry>();
 let currentGroup: ToolGroup | null = null;
 let groupSeq = 0;
+/**
+ * True between agent_start and agent_end. While live, a row that shows up in
+ * renderCall (its args are still streaming) joins the open group right away, so
+ * it never paints as a solo row that vanishes once execution starts.
+ */
+let live = false;
 /** Latest theme seen by a renderer (pi has no theme-change event). */
 let currentTheme: Theme | undefined;
 /** `context.invalidate()` of some live row — repaint without capturing the TUI. */
@@ -129,6 +140,7 @@ function resetState(): void {
 	stopAnimation();
 	entries.clear();
 	currentGroup = null;
+	live = false;
 	repaint = undefined;
 }
 
@@ -144,7 +156,7 @@ function openGroup(): ToolGroup {
 	return group;
 }
 
-/** A boundary (visible text, user message, foreign tool) ends the current group. */
+/** A boundary (visible text, user message, agent_end) ends the current group. */
 function closeGroup(): void {
 	if (currentGroup) {
 		currentGroup.closed = true;
@@ -152,15 +164,34 @@ function closeGroup(): void {
 	}
 }
 
+function hasRun(entry: ToolEntry): boolean {
+	return entry.startedAt !== undefined || entry.hasResult;
+}
+
 /**
- * Look up (or create) the entry for a tool call.
- *
- * `live` is true only for `tool_execution_start`, i.e. when we know the call is
- * executing right now in this process — that is what makes a group. Rows created
- * by the renderer before the start event, and rows replayed from a stored
- * session, stay ungrouped and render as a standalone line.
+ * A tool we do not own is about to paint its native row. Calls of ours that are
+ * still queued sit *after* that row in the transcript (start events fire in
+ * call order), so they move to a fresh group; the calls that already ran stay
+ * in the old one, which is closed. Visual order keeps matching the transcript.
  */
-function ensureEntry(toolCallId: string, name: string, args: any, live: boolean): ToolEntry {
+function splitGroupAtForeignTool(): void {
+	const group = currentGroup;
+	if (!group) return;
+	const queued = group.tools.filter((tool) => !hasRun(tool));
+	if (queued.length === group.tools.length) return; // nothing of ours precedes the foreign row
+	closeGroup();
+	if (queued.length === 0) return;
+	group.tools = group.tools.filter(hasRun);
+	const next = openGroup();
+	for (const tool of queued) {
+		tool.group = next;
+		next.tools.push(tool);
+	}
+	next.expanded = queued[0]!.expanded;
+}
+
+/** Look up (or create) the entry for a tool call. */
+function ensureEntry(toolCallId: string, name: string, args: any): ToolEntry {
 	let entry = entries.get(toolCallId);
 	if (!entry) {
 		entry = {
@@ -170,20 +201,26 @@ function ensureEntry(toolCallId: string, name: string, args: any, live: boolean)
 			resultText: "",
 			isError: false,
 			pending: false,
+			hasResult: false,
 			expanded: false,
 		};
 		entries.set(toolCallId, entry);
 	}
 	if (args !== undefined) entry.args = args;
-	if (live && !entry.group) {
-		const group = currentGroup && !currentGroup.closed ? currentGroup : openGroup();
-		if (group.tools.length === 0) group.startedAt = Date.now();
-		group.tools.push(entry);
-		entry.group = group;
-		entry.startedAt = Date.now();
-		if (entry.expanded) group.expanded = true;
-	}
 	return entry;
+}
+
+/**
+ * Put a live call into the open group (creating one if needed). Called from
+ * renderCall while the agent is live and from tool_execution_start; rows
+ * replayed from a stored session never get here and stay standalone.
+ */
+function joinGroup(entry: ToolEntry): void {
+	if (entry.group) return;
+	const group = currentGroup ?? openGroup();
+	group.tools.push(entry);
+	entry.group = group;
+	if (entry.expanded) group.expanded = true;
 }
 
 function isLeader(entry: ToolEntry): boolean {
@@ -240,9 +277,16 @@ function spinnerFrame(now: number): string {
 }
 
 function statusIcon(entry: ToolEntry, now: number): { icon: string; color: string } {
-	if (entry.pending) return { icon: spinnerFrame(now), color: "accent" };
-	if (entry.isError) return { icon: "✗", color: "error" };
-	return { icon: "✓", color: "success" };
+	switch (toolState(entry)) {
+		case "running":
+			return { icon: spinnerFrame(now), color: "accent" };
+		case "failed":
+			return { icon: "✗", color: "error" };
+		case "ok":
+			return { icon: "✓", color: "success" };
+		case "queued":
+			return { icon: QUEUED_ICON, color: "muted" };
+	}
 }
 
 // =============================================================================
@@ -394,8 +438,11 @@ export default function (pi: ExtensionAPI) {
 			renderCall: (args: any, renderTheme: Theme, context: RenderContext) => {
 				currentTheme = renderTheme;
 				repaint = context.invalidate;
-				const entry = ensureEntry(context.toolCallId, name, args, false);
+				const entry = ensureEntry(context.toolCallId, name, args);
 				entry.expanded = context.expanded;
+				// Join while the args are still streaming; pending/startedAt stay
+				// untouched until tool_execution_start says the call really runs.
+				if (live && !entry.hasResult) joinGroup(entry);
 				if (isLeader(entry)) entry.group!.expanded = context.expanded;
 				entry.row ??= new RowComponent(entry);
 				return entry.row;
@@ -411,7 +458,10 @@ export default function (pi: ExtensionAPI) {
 					// tool_execution_end. context.isError mirrors the row's real state and
 					// is also correct for replayed history.
 					entry.isError = context.isError;
-					if (!options?.isPartial) entry.pending = false;
+					if (!options?.isPartial) {
+						entry.pending = false;
+						entry.hasResult = true;
+					}
 					entry.expanded = context.expanded;
 					if (isLeader(entry)) entry.group!.expanded = context.expanded;
 				}
@@ -449,15 +499,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", (event) => {
+		live = true;
 		if (!BUILTIN_TOOL_NAMES.has(event.toolName)) {
-			// A tool we do not own renders its own native row; end the block so the
-			// visual order keeps matching the transcript order.
-			closeGroup();
+			splitGroupAtForeignTool();
 			return;
 		}
-		const entry = ensureEntry(event.toolCallId, event.toolName, event.args, true);
+		const entry = ensureEntry(event.toolCallId, event.toolName, event.args);
+		joinGroup(entry);
 		entry.pending = true;
-		entry.startedAt ??= Date.now();
+		entry.startedAt = Date.now();
 		ensureAnimation();
 	});
 
@@ -472,6 +522,7 @@ export default function (pi: ExtensionAPI) {
 		const entry = entries.get(event.toolCallId);
 		if (!entry) return;
 		entry.pending = false;
+		entry.hasResult = true;
 		entry.endedAt = Date.now();
 		entry.isError = Boolean(event.isError);
 		entry.resultText = resultTextOf(event.result);
@@ -479,7 +530,13 @@ export default function (pi: ExtensionAPI) {
 		repaint?.();
 	});
 
+	pi.on("agent_start", () => {
+		live = true;
+	});
+
 	pi.on("agent_end", () => {
+		// Calls that never started keep the queued icon: they did not succeed.
+		live = false;
 		closeGroup();
 		for (const entry of entries.values()) {
 			if (!entry.pending) continue;
