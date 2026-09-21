@@ -237,6 +237,10 @@ TZ=UTC vitest run
 # pi-execution-time 的测试
 cd extensions/pi-execution-time
 node --test tests/*.test.ts
+
+# pi-compact-calls 的测试（纯逻辑在 format.ts，不依赖 pi 运行时）
+cd extensions/pi-compact-calls
+node --test tests/*.test.ts
 ```
 
 测试原则：

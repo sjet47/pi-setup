@@ -1,16 +1,30 @@
 /**
  * pi-compact-calls — fold consecutive built-in tool calls into one compact block.
  *
- * A live turn renders as:
+ * A live turn renders as two lines while collapsed:
  *
- *   ⠋ 3 tool calls · 6.1s
+ *   ⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
+ *   └ ⠋ bash: sleep 3 && echo one (3.0s)
+ *
+ * and, after Ctrl+O, as one row per tool with a result preview (bash: last
+ * lines, edit: its diff, everything else: first lines):
+ *
+ *   ✗ 3 tool calls (2 bash, 1 edit) · 1 failed · 3.0s
  *   ├ ✓ bash: sleep 3 && echo one (3.0s)
- *   ├ ✓ bash: echo two (0.0s)
- *   └ ✓ bash: ls /tmp | head -3 (0.0s)
+ *   │   one
+ *   ├ ✓ edit: src/a.ts +2 −1 (0.0s)
+ *   │   -12 old line
+ *   │   +12 new line
+ *   └ ✗ bash: cd /nope (0.0s) — cd: /nope: No such file or directory (exit 1)
  *
- * instead of three native rows (blank / `$ cmd` / blank / output / blank /
- * `Took X.Xs` / blank each). Ctrl+O expands the block to show per-tool result
- * previews.
+ * instead of native rows (blank / `$ cmd` / blank / output / blank /
+ * `Took X.Xs` / blank each).
+ *
+ * Icons: ○ queued (args streaming, waiting, or never ran) · spinner running ·
+ * ✓ / ✗ finished. The header shows a static ⠿ while the block is still open
+ * but nothing is executing (the model is writing the next call) and settles to
+ * ✓ / ✗ / ○ only once the block is closed. Header time is the union of the
+ * tool execution intervals, i.e. pure tool time.
  *
  * Design notes:
  *
@@ -32,6 +46,15 @@
  *   come from pi's own tool events plus our spinner interval, which reuses
  *   `context.invalidate()` (it already calls `ui.requestRender()`), so the TUI
  *   instance never has to be captured through a widget.
+ *
+ * - renderCall fires while the args are still streaming, before
+ *   tool_execution_start. While the agent is live (agent_start..agent_end) such
+ *   a row joins the open block right away, in the queued state, so it never
+ *   paints as a solo row that later collapses to 0 lines. pending/startedAt are
+ *   still owned by tool_execution_start.
+ *
+ * - Pure logic (formatting, selection, width-based layout) lives in format.ts
+ *   and is unit-tested with `node --test tests/*.test.ts`.
  *
  * - Thinking is deliberately untouched: pi keeps rendering its own `Thinking...`
  *   row (click to expand). Nothing here depends on pi internals.
