@@ -156,6 +156,7 @@ test("errorTail: last non-empty line, bash exit line folded in", () => {
 	);
 	assert.equal(errorTail("make: *** [all] Error 2\nCommand exited with code 2"), "make: *** [all] Error 2 (exit 2)");
 	assert.equal(errorTail("Command exited with code 2"), "Command exited with code 2");
+	assert.equal(errorTail("(no output)\n\nCommand exited with code 1"), "exit 1");
 });
 
 test("typeBreakdown: by count, ties in order of appearance, empty for one type", () => {

@@ -170,6 +170,7 @@ export function errorTail(text: string): string {
 	if (last === undefined) return "";
 	const exit = /^Command exited with code (\d+)$/.exec(last);
 	const before = lines[lines.length - 2];
+	if (exit && before === "(no output)") return `exit ${exit[1]}`;
 	// Drop the shell's own "/bin/bash: line 1: " lead so the cause survives truncation.
 	if (exit && before !== undefined) return `${before.replace(/^\S*sh: (line \d+: )?/, "")} (exit ${exit[1]})`;
 	return last;
