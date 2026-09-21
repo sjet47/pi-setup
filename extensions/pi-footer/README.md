@@ -3,14 +3,15 @@
 输入框上边框的**唯一 owner**：session name 与实时 TPS 统计行都画在这一行上，与 pi 原生的 working / compaction / retry / branchSummary spinner 共用同一行。
 
 ```
-工作中  ── ⠼ Working ──────── ⚡42t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s 🧠12 ⏳2.1s  feat/auth ─
+工作中  ── ⠼ Working ──────── ⚡42t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s 🧠12 ⏳2.1s── feat/auth ─
 输入框  │ 在这里打字…                                                             │
         ──────────────────────────────────────────────────────────────────────────
-空闲    ────────────────────── ⚡38t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s 🧠12 ⏳2.1s  feat/auth ─
+空闲    ────────────────────── ⚡38t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s 🧠12 ⏳2.1s── feat/auth ─
 无内容  ──────────────────────────────────────────────────────────────────────────
 ```
 
-- 右侧最外是 session name（`/name` 设置的，Claude Code 风格）；没有 name 时右边只剩 stats。
+- 右侧最外是 session name（`/name` 设置的，Claude Code 风格），外侧留一个空格再接收尾的 `─`；没有 name 时右边只剩 stats。
+- stats 与 name 之间的间隔也是 border line（两列 `─`），整条上边框从 status 到右端是一条连续的线；只有 name 自身两侧留空格做呼吸。
 - stats 行（从 [pi-tps](https://github.com/summertime-wu/pi-tps) 收编）排在 name 左边，**多行瀑布时间轴已移除** —— 单行边框放不下。
 - 空闲（`agent_end` 之后）：保留上一轮的数值，整行转 muted；`agent_start` 时清空，不会拿上一轮的数字冒充本轮。
 - run 还没产出任何数据、且没有 session name 时，整行就是原生 dash，和没装本扩展一样。
@@ -93,6 +94,7 @@ tmux 实机（`pi -ne -e extensions/pi-footer/index.ts -n feat/auth`，150 / 60 
 - 无 session name：`── ⠋ Working ───⚡73t/s ↓73 ⏱0.8s 🧠11 ⏳1.6s─` ✓
 - 多行输入触发滚动 → 上边框变 `↑ 2 more`（原生接管）✓
 - 每帧用 `visibleWidth` 校验等于面板宽度：150 列与 60 列各 14 帧全部 OK ✓
+- stats 与 name 之间的间隔改成 border line（用户 2026-09-21 提的：原来那里是空白，看起来像边框断了一截）；纯函数渲染在 40/60/80/110/150 列校验宽度仍严格守恒 ✓
 - 配色：theme 模式实测 `core=text / ↓=success / ⏱=warning / 🧠=thinkingText / ⏳=dim`；`morandi` 预设实测 `252/108/180/103/244`；空闲统一 muted ✓
 - `/pi-footer`：三个选项可切换并写入配置（实测关掉 `showStats` 后边框只剩 name），预设子菜单 4 色 swatch 正常 ✓
 - `/reload`：分别给 `index.ts`（`showTtft` 默认值）和 `tps.ts`（`🔧`→`⚙` 标记）打标记后 `/reload`，两者都生效，编辑器重新注册后边框继续工作 ✓

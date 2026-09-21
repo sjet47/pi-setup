@@ -490,7 +490,9 @@ export function composeTopBorder(input: TopBorderInput): string {
 	const head = status ? `── ${status} ` : "";
 	const right =
 		(statsWidth > 0 ? stats : "") +
-		(sepWidth > 0 ? "  " : "") +
+		// The gap before the session name is border too, so the line reads as one
+		// continuous rule instead of stopping and starting again.
+		(sepWidth > 0 ? input.border("─".repeat(SEP_WIDTH)) : "") +
 		nameLabel +
 		(tailWidth > 0 ? input.border("─") : "");
 
