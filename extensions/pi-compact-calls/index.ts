@@ -3,7 +3,7 @@
  *
  * A live turn renders as:
  *
- *   ⠋ 3 次工具调用 · 6.1s
+ *   ⠋ 3 tool calls · 6.1s
  *   ├ ✓ bash: sleep 3 && echo one (3.0s)
  *   ├ ✓ bash: echo two (0.0s)
  *   └ ✓ bash: ls /tmp | head -3 (0.0s)
@@ -327,7 +327,7 @@ function resultPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
 		fg("dim", SUB_INDENT) + truncateToWidth(fg("toolOutput", line), Math.max(1, contentWidth - SUB_INDENT.length), "…"),
 	);
 	if (allLines.length > lines.length) {
-		rows.push(`${fg("dim", SUB_INDENT)}${fg("muted", `… 另有 ${allLines.length - lines.length} 行`)}`);
+		rows.push(`${fg("dim", SUB_INDENT)}${fg("muted", `… ${allLines.length - lines.length} more lines`)}`);
 	}
 	return rows;
 }
@@ -362,11 +362,11 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const contentWidth = Math.max(1, width - INDENT.length);
 
 	// A single tool needs no header: the tool line already carries state, summary
-	// and duration. Only batches show the “N 次工具调用 · total” summary.
+	// and duration. Only batches show the “N tool calls · total” summary.
 	const lines: string[] = [];
 	if (group.tools.length > 1) {
 		lines.push(
-			`${fg(headColor, icon)} ${fg(headColor, bold(`${group.tools.length} 次工具调用`))} ${fg("muted", `· ${formatDuration(endedAt - group.startedAt)}`)}`,
+			`${fg(headColor, icon)} ${fg(headColor, bold(`${group.tools.length} tool call${group.tools.length === 1 ? "" : "s"}`))} ${fg("muted", `· ${formatDuration(endedAt - group.startedAt)}`)}`,
 		);
 	}
 
@@ -381,7 +381,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth));
 	});
 	if (hiddenCount > 0) {
-		lines.push(`${fg("dim", "… ")}${fg("muted", `另有 ${hiddenCount} 次调用`)} ${fg("dim", "(Ctrl+O 展开)")}`);
+		lines.push(`${fg("dim", "… ")}${fg("muted", `${hiddenCount} more call${hiddenCount === 1 ? "" : "s"}`)} ${fg("dim", "(Ctrl+O to expand)")}`);
 	}
 
 	if (pending) ensureAnimation();
