@@ -24,6 +24,21 @@ export const SUMMARY_HARD_LIMIT = 240;
 /** A truncated error tail narrower than this is not worth showing. */
 const MIN_ERROR_TAIL_WIDTH = 12;
 
+/**
+ * Should this text event seal the open block?
+ *
+ * A text block streams as text_start / text_delta … / text_end, and every one of
+ * those events carries the *accumulated* text — so a naive `text.trim() !== ""`
+ * check fires over and over. `text_end` is especially dangerous: by then the
+ * message content already holds this message's toolCall blocks, and pi's own
+ * handler creates those tool rows before extension handlers run, so a second seal
+ * closes the block that the message's own tools just joined and strands them as
+ * one-tool blocks. Seal at most once per text block.
+ */
+export function shouldSealText(sealed: ReadonlySet<number>, contentIndex: number, text: string): boolean {
+	return text.trim().length > 0 && !sealed.has(contentIndex);
+}
+
 /** The slice of a tool entry the pure helpers need. */
 export type ToolView = {
 	name: string;

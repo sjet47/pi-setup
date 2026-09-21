@@ -94,6 +94,7 @@ import {
 	pickCollapsedTool,
 	previewModeOf,
 	selectPreview,
+	shouldSealText,
 	summaryOf,
 	toolState,
 	typeBreakdown,
@@ -182,6 +183,12 @@ type ToolGroup = {
 const entries = new Map<string, ToolEntry>();
 let currentGroup: ToolGroup | null = null;
 /**
+ * Text blocks of the current assistant message that already sealed the open block.
+ * Keyed by contentIndex and cleared per message — see shouldSealText() for why
+ * sealing twice per text block strands the message's own tool rows.
+ */
+const sealedTextIndexes = new Set<number>();
+/**
  * True between agent_start and agent_end. While live, a row that shows up in
  * renderCall (its args are still streaming) joins the open group right away, so
  * it never paints as a solo row that vanishes once execution starts.
@@ -196,6 +203,7 @@ let animTimer: ReturnType<typeof setInterval> | undefined;
 function resetState(): void {
 	stopAnimation();
 	entries.clear();
+	sealedTextIndexes.clear();
 	currentGroup = null;
 	live = false;
 	repaint = undefined;
@@ -616,6 +624,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", (event) => {
+		if ((event.message as any)?.role === "assistant") sealedTextIndexes.clear();
 		// Only a new user turn ends a block. Assistant messages do NOT: within one
 		// turn, every tool call that is not separated by visible prose belongs to the
 		// same block, which the single collapsed line keeps showing live.
@@ -630,8 +639,10 @@ export default function (pi: ExtensionAPI) {
 		const content = (event.message as any)?.content;
 		const index = Number(stream.contentIndex);
 		const block = Array.isArray(content) && Number.isInteger(index) ? content[index] : undefined;
-		const text = block?.type === "text" ? String(block.text ?? "").trim() : "";
-		if (text.length > 0) closeGroup();
+		const text = block?.type === "text" ? String(block.text ?? "") : "";
+		if (!shouldSealText(sealedTextIndexes, index, text)) return;
+		sealedTextIndexes.add(index);
+		closeGroup();
 	});
 
 	pi.on("tool_execution_start", (event) => {

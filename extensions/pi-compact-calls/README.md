@@ -81,6 +81,7 @@
 - 工具定义用 `{ ...createXTool(cwd), renderShell: "self", renderCall, renderResult }` 注册，因此 **description / promptSnippet / promptGuidelines / constrainedSampling 和原生 execute 全部保留**，只替换渲染。（对照：pi-compact-ui 手写定义，把描述退化成 `Built-in bash (rendering handled by compact-ui group)`，并丢掉 0.86.1 的 strict JSON-schema 采样。）
 - pi 每帧全量重渲染整棵树、不做 dirty 跳过，所以 leader 会自动带上后加入的工具；重绘由 pi 自己的工具事件 + 我们的 spinner 定时器（100ms）驱动，定时器复用 `context.invalidate()`（内部已调 `ui.requestRender()`），因此**不需要通过 widget 去偷 TUI 实例**。
 - 分块边界：`message_start(user)`（新的一轮 ⇒ 新块）、`tool_execution_start` 里非内置工具名（⇒ 在该处拆块）、出现可见正文（`text_*` 事件且对应块非空 ⇒ 断块）；`agent_end` 也封口。assistant 消息边界**不**断开。
+- **每个文本块只封口一次**（按 `contentIndex` 去重，`format.ts` 的 `shouldSealText`）。`text_start`/`text_delta`/`text_end` 携带的都是**累积**文本，所以「非空就封口」会反复触发；而 `text_end` 到达时 message.content 已经含本消息的 toolCall，pi 又是在扩展处理函数**之前**建行 —— 多封一次就会把本消息自己的工具行关在「只有 1 个成员的已封口组」里，表现为几个调用各自渲染成独立一行（`✓ read: …` / `✓ grep: …`，都没有块头）。
 - **入组时机**：`renderCall` 在参数还在流式生成时就会被调用，早于 `tool_execution_start`。用 `agent_start`/`agent_end` 记录 live 状态；live 期间 `renderCall` 见到新的 toolCallId 就立刻加入当前打开的块（没有则新建），所以不会先画成独立一行、执行开始后又塌成 0 行。`pending` / `startedAt` 仍然只由 `tool_execution_start` 设置。
 - **三态**：`pending` ⇒ running；`hasResult`（`tool_execution_end`，或非 partial 的 `renderResult` —— 重放行走这条）⇒ ok/failed；两者都没有 ⇒ queued（`○`）。
 - 纯逻辑（时长格式化、摘要、折叠态选取、区间并集、diff 计数、预览头/尾选取、块头与工具行的按宽度排版）都在 `format.ts`，不依赖 pi 运行时；`index.ts` 只管状态、事件和主题。宽度计算用 pi-tui 的 `visibleWidth` / `truncateToWidth`（字符串带 ANSI、可能有宽字符）。
@@ -144,3 +145,13 @@ tmux 实机跑 `pi -ne -e extensions/pi-compact-calls/index.ts`（0.1s 间隔连
 - 一条消息内 `bash` / `dummy_echo`（非内置）/ `bash` → 三行顺序与 transcript 一致，第二个 bash 在 dummy 之后另起一块 ✓
 
 未在实机验证（仅单测覆盖）：`formatDuration` 进位、`≥ 1m` 的耗时显示、宽字符路径的截断、结果超过 `RESULT_TEXT_LIMIT` 时的头/尾裁剪。
+
+## 验证记录（2026-09-21 第三轮，分块边界修复）
+
+`node --test tests/*.test.ts` 20 项全过（新增 `tests/boundary.test.ts` 覆盖 `shouldSealText`）；本扩展 typecheck 0 报错。
+
+tmux 实机（`pi -ne -e extensions/pi-compact-calls/index.ts`）：
+
+- 一句正文 + 并行 `echo F1` / `echo F2`，下一条消息无正文再 `echo F3` → **合成一块** `✓ 3 tool calls · 0.0s · Ctrl+O to expand` ✓
+- 再输出一句正文后调用 `echo F4` → 另起单行 `✓ bash: echo F4 (0.0s)` ✓
+- 触发原始 bug 的场景（正文 + 同一条消息里 read/grep 或 write/edit，正文较长时 `text_end` 会在工具行建好后到达）在新代码下不再劈成多个单成员块 ✓
