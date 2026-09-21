@@ -56,15 +56,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
-import { homedir } from "os";
+import { formatDuration, pickCollapsedTool, summaryOf } from "./format.ts";
 
 // =============================================================================
 // Tunables
 // =============================================================================
 /** Result lines shown per tool when the block is expanded (Ctrl+O). */
 const EXPANDED_RESULT_LINES = 5;
-/** Argument summary length. */
-const SUMMARY_MAX_CHARS = 60;
 /** Keep at most this much result text per tool in memory (for previews). */
 const RESULT_TEXT_LIMIT = 4000;
 const SPINNER_MS = 100;
@@ -220,56 +218,11 @@ function stopAnimation(): void {
 // =============================================================================
 // Formatting helpers
 // =============================================================================
-function shortenPath(path: string): string {
-	const home = homedir();
-	return path.startsWith(home) ? `~${path.slice(home.length)}` : path;
-}
-
-function oneLine(value: unknown, max = SUMMARY_MAX_CHARS): string {
-	const text = String(value ?? "").replace(/\s+/g, " ").trim();
-	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
-function formatDuration(ms: number): string {
-	const totalSeconds = Math.max(0, ms) / 1000;
-	if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = Math.round(totalSeconds % 60);
-	if (minutes < 60) return `${minutes}m ${seconds}s`;
-	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
 function entryDuration(entry: ToolEntry): string | undefined {
 	if (entry.startedAt === undefined) return undefined;
 	const end = entry.endedAt ?? (entry.pending ? Date.now() : undefined);
 	if (end === undefined) return undefined;
 	return formatDuration(end - entry.startedAt);
-}
-
-function summaryOf(entry: ToolEntry): string {
-	const args: any = entry.args ?? {};
-	switch (entry.name) {
-		case "bash":
-			return oneLine(args.command ?? "…");
-		case "read":
-		case "write":
-		case "edit":
-			return oneLine(shortenPath(String(args.path ?? "…")));
-		case "find":
-		case "grep":
-			return oneLine(`${args.pattern ?? ""} in ${shortenPath(String(args.path ?? "."))}`);
-		case "ls":
-			return oneLine(shortenPath(String(args.path ?? ".")));
-		default: {
-			const preferred = args.path ?? args.query ?? args.name ?? args.description ?? args.url;
-			if (preferred !== undefined) return oneLine(preferred);
-			try {
-				return oneLine(JSON.stringify(args));
-			} catch {
-				return "…";
-			}
-		}
-	}
 }
 
 function resultTextOf(result: any): string {
@@ -313,7 +266,7 @@ function toolLine(rail: string, entry: ToolEntry, now: number): string {
 		fg("toolTitle", bold(entry.name)) +
 		fg("dim", ":") +
 		" " +
-		fg("dim", summaryOf(entry)) +
+		fg("dim", summaryOf(entry.name, entry.args)) +
 		(duration ? ` ${fg("muted", `(${duration})`)}` : "")
 	);
 }
@@ -330,18 +283,6 @@ function resultPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
 		rows.push(`${fg("dim", SUB_INDENT)}${fg("muted", `… ${allLines.length - lines.length} more lines`)}`);
 	}
 	return rows;
-}
-
-/**
- * The single call shown while collapsed: the newest still-running call wins, and
- * once the whole batch is done the last call in it.
- */
-function pickCollapsedTool(tools: ToolEntry[]): ToolEntry {
-	for (let index = tools.length - 1; index >= 0; index--) {
-		const tool = tools[index]!;
-		if (tool.pending) return tool;
-	}
-	return tools[tools.length - 1]!;
 }
 
 function groupEndedAt(group: ToolGroup): number | undefined {
