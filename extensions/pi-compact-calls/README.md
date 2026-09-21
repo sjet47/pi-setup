@@ -35,6 +35,7 @@
 
 - 重放的历史工具行渲染成单行紧凑行（没有实时事件可用于分组），不是原生多行样式。
 - 重放行的展开态（`Ctrl+O`）依赖 `renderCall` 的 `context.expanded`，`isError` 依赖 `context.isError`（重放时也可用）；但 `renderResult` 拿到的 result 对象**不含** `isError`，不要用它覆盖状态。
+- 块上**点击**展开依赖该行的 result 已经存在（pi 的 `createResultRegion` 先判 `this.result`），所以第一个工具还在跑时点击无效；`Ctrl+O` 任何时候都好用。
 - 非内置工具不参与分块（我们只能控制自己注册的工具行）。
 - 行数上限（折叠 3 行 / 展开 5 行 / 摘要 60 字符 / 结果保留 4000 字符）目前是源码顶部常量，没有配置文件。
 - 主题从 renderer 参数里取最新值（pi 没有主题切换事件），切换主题后需等一次重绘才刷新。
