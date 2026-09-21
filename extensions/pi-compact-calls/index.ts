@@ -349,15 +349,25 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const endedAt = pending ? now : (groupEndedAt(group) ?? now);
 	const contentWidth = Math.max(1, width - INDENT.length);
 
-	const lines = [
-		`${fg(headColor, icon)} ${fg(headColor, bold(`${group.tools.length} 次工具调用`))} ${fg("muted", `· ${formatDuration(endedAt - group.startedAt)}`)}`,
-	];
+	// A single tool needs no header: the tool line already carries state, summary
+	// and duration. Only batches show the “N 次工具调用 · total” summary.
+	const lines: string[] = [];
+	if (group.tools.length > 1) {
+		lines.push(
+			`${fg(headColor, icon)} ${fg(headColor, bold(`${group.tools.length} 次工具调用`))} ${fg("muted", `· ${formatDuration(endedAt - group.startedAt)}`)}`,
+		);
+	}
 
-	const visible = group.expanded ? group.tools : group.tools.slice(0, COLLAPSED_TOOL_LINES);
+	// One hidden tool would cost the same one line as the "… 另有 1 次" summary, so
+	// show it instead of hiding exactly one real tool.
+	let visibleCount = COLLAPSED_TOOL_LINES;
+	if (group.tools.length === visibleCount + 1) visibleCount = group.tools.length;
+	const visible = group.expanded ? group.tools : group.tools.slice(0, visibleCount);
 	const hiddenCount = group.tools.length - visible.length;
 	visible.forEach((tool, index) => {
 		const isLastRow = index === visible.length - 1 && hiddenCount === 0;
-		lines.push(toolLine(isLastRow ? RAIL_END : RAIL_MID, tool, now));
+		const rail = group.tools.length === 1 ? "" : isLastRow ? RAIL_END : RAIL_MID;
+		lines.push(toolLine(rail, tool, now));
 		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth));
 	});
 	if (hiddenCount > 0) {
@@ -471,7 +481,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", (event) => {
-		if ((event.message as any)?.role === "user") closeGroup();
+		// A block covers exactly one assistant message — i.e. one batch of tool
+		// calls. `message_start(assistant)` is emitted before that message's content
+		// (and therefore before its tool rows exist / execute), while message_end
+		// arrives before execution starts and would split parallel batches apart.
+		// tool_result messages are skipped for the same reason.
+		const role = (event.message as any)?.role;
+		if (role === "assistant" || role === "user") closeGroup();
 	});
 
 	pi.on("message_update", (event) => {

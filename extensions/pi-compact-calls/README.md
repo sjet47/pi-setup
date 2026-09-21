@@ -15,13 +15,26 @@
 
 | 情况 | 渲染 |
 |---|---|
-| 一轮里连续 / 并行的内置工具调用 | 合成一个块，块头显示调用次数、总耗时、状态（`⠋` 进行中 / `✓` 全部成功 / `✗` 有失败） |
-| 折叠态 | 最多显示 3 个工具行，多出的折叠为 `… 另有 N 次调用 (Ctrl+O 展开)` |
+| **同一条 assistant 消息**里的并行工具调用 | 合成一个块，块头显示 `N 次工具调用 · 总耗时` 与状态（`⠋` 进行中 / `✓` 全部成功 / `✗` 有失败） |
+| 只有 1 个工具的消息 | 不加块头，直接一行 `⠋ bash: sleep 25 && echo one (17.5s)`（单工具下块头只是噪声） |
+| 后续消息里的工具 | **另起一块**（每块 = 一条 assistant 消息）—— 块总是画在该批工具真实发生的位置 |
+| 折叠态上限 | 最多 3 个工具行；恰好剩余 1 个时直接显示它（「… 另有 1 次」本身也占一行） |
 | 展开态（`Ctrl+O`） | 每个工具下追加结果预览（最多 5 行 + `… 另有 N 行`），运行中也能看到流式输出 |
-| 出现可见正文 | 结束当前块，之后的工具调用另起一块 |
 | 中间夹了非内置工具（MCP、subagent 等） | 断开分块，那个工具保持原生渲染 |
 | 恢复历史会话 / `/tree` / `/reload` 重放 | 重放的工具行没有实时事件，无法分块，退化成单行紧凑行（`✓ bash: echo A`） |
 | thinking | 完全不碰，继续由 pi 原生渲染成 `Thinking...` 行（可点击展开全文） |
+
+### 为什么按「一条 assistant 消息 = 一块」切
+
+早先的规则是「跨消息合并，只有可见正文才分界」，实测出两个真问题：
+
+1. 块只画在**组内第一个工具行**的位置，后一条消息的工具渲染成 0 行 → 它们在 transcript 里的位置变成空白，活动记录被挤到块头的 `… 另有 N 次` 里；
+2. 长 agentic 运行会累积成一个巨块，里面还只显示最早的工具，看不到当前在干什么。
+
+所以分块边界改为 assistant 消息本身。正确信号是 `message_start(assistant)`：它在该消息内容（和工具行）出现之前触发。两个**不能用**的信号：
+
+- `message_end(assistant)` 在工具开始执行之前触发 → 会把同一批并行调用拆散；
+- `message_start(tool_result)` 会插在批内的工具执行之间 → 同样会拆散并行批次。
 
 ## 实现要点
 
@@ -29,7 +42,7 @@
 - 0 行必须配合 `renderShell: "self"`：默认 shell 下即使内容为空，`ToolExecutionComponent` 自带的 `Spacer(1)` 仍会留下一个空行。
 - 工具定义用 `{ ...createXTool(cwd), renderShell: "self", renderCall, renderResult }` 注册，因此 **description / promptSnippet / promptGuidelines / constrainedSampling 和原生 execute 全部保留**，只替换渲染。（对照：pi-compact-ui 手写定义，把描述退化成 `Built-in bash (rendering handled by compact-ui group)`，并丢掉 0.86.1 的 strict JSON-schema 采样。）
 - pi 每帧全量重渲染整棵树、不做 dirty 跳过，所以 leader 会自动带上后加入的工具；重绘由 pi 自己的工具事件 + 我们的 spinner 定时器（100ms）驱动，定时器复用 `context.invalidate()`（内部已调 `ui.requestRender()`），因此**不需要通过 widget 去偷 TUI 实例**。
-- 分块边界只依赖公开事件：`tool_execution_start`（非内置工具名 ⇒ 断块）、`message_update` 的 `text_*`（出现可见正文 ⇒ 断块）、`message_start`（用户新消息 ⇒ 断块）。
+- 分块边界：`message_start(assistant|user)`（新消息 ⇒ 新块）、`tool_execution_start` 里非内置工具名（⇒ 断块）、同一条消息内出现可见正文（`text_*` 事件，⇒ 断块）。
 
 ## 已知限制
 
@@ -45,10 +58,12 @@
 
 tmux 实机跑 `pi -ne -e extensions/pi-compact-calls/index.ts`：
 
-- 顺序 3 次 bash → 单块 4 行；`Ctrl+O` 展开显示 3 条结果 ✓
-- 一条消息内并行 3 次 bash → 单块 ✓
+- 一条消息内并行 4 次 bash → 单块 5 行（块头 + 4 行，全部显示）✓
+- 两条消息各 1 次 bash（中间无可见正文）→ **两行**，各自成块，无块头 ✓
+- 两批各 4 个并行调用（中间无可见正文）→ **两个独立的 4 次块**（修复前会并成一块 8 次）✓
+- 文本 → 工具 → 文本 → 工具（同一轮）→ 两个块，位置正确 ✓
 - 失败命令（`cd /nonexistent-dir-xyz`）→ 块头与工具行显示 `✗`，展开可见 `Command exited with code 1` ✓
 - 64 列窄终端 → 截断正常 ✓
 - `-c` 恢复历史会话 → 历史行退化成单行紧凑行，无跨轮巨型块 ✓
 - 中间夹 `dummy_echo`（非内置）→ 断成两块，dummy 保持原生渲染 ✓
-- 新会话的系统提示里 `- bash: Execute bash commands (ls, grep, find, etc.)` 仍是原生描述 ✓
+- 新会话的系统提示里 `- bash: Execute bash commands (ls, grep, find, etc.)` 仍是原生描述；reload 时 pi 记录的 `toolsAdded` 里带 `constrainedSampling` ✓
