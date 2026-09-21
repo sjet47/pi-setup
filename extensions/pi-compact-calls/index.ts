@@ -96,7 +96,9 @@ const QUEUED_ICON = "○";
 const IDLE_ICON = "⠿";
 const EXPAND_HINT = "Ctrl+O to expand";
 const INDENT = " ";
+/** Lead of a preview row: the rail continues under every tool but the last. Same width for both. */
 const SUB_INDENT = "    ";
+const SUB_INDENT_RAIL = "│   ";
 const RAIL_MID = "├ ";
 const RAIL_END = "└ ";
 
@@ -394,28 +396,28 @@ function colorDiff(diffText: string): string[] {
 }
 
 /** An edit shows its diff instead of the "Successfully replaced…" text. */
-function diffPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
+function diffPreviewLines(entry: ToolEntry, contentWidth: number, lead: string): string[] {
 	const shown = entry.diff!.split("\n").slice(0, EXPANDED_DIFF_LINES);
 	const total = Math.max(entry.diffLineCount ?? shown.length, shown.length);
 	const rows = colorDiff(shown.join("\n")).map(
-		(line) => fg("dim", SUB_INDENT) + truncateToWidth(line, Math.max(1, contentWidth - SUB_INDENT.length), "…"),
+		(line) => fg("dim", lead) + truncateToWidth(line, Math.max(1, contentWidth - lead.length), "…"),
 	);
 	if (total > shown.length) {
-		rows.push(`${fg("dim", SUB_INDENT)}${fg("muted", `… ${total - shown.length} more lines`)}`);
+		rows.push(`${fg("dim", lead)}${fg("muted", `… ${total - shown.length} more lines`)}`);
 	}
 	return rows;
 }
 
 /** Result preview rows for an expanded block (live output included while running). */
-function resultPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
-	if (entry.diff && !entry.isError) return diffPreviewLines(entry, contentWidth);
+function resultPreviewLines(entry: ToolEntry, contentWidth: number, lead: string = SUB_INDENT): string[] {
+	if (entry.diff && !entry.isError) return diffPreviewLines(entry, contentWidth, lead);
 	const preview = selectPreview(entry.resultText, EXPANDED_RESULT_LINES, previewModeOf(entry.name), entry.resultLineCount);
-	const note = (text: string) => `${fg("dim", SUB_INDENT)}${fg("muted", text)}`;
+	const note = (text: string) => `${fg("dim", lead)}${fg("muted", text)}`;
 	const rows: string[] = [];
 	// bash shows its last lines, so the omitted part comes first.
 	if (preview.hidden > 0 && preview.mode === "tail") rows.push(note(`… ${preview.hidden} earlier lines`));
 	for (const line of preview.lines) {
-		rows.push(fg("dim", SUB_INDENT) + truncateToWidth(fg("toolOutput", line), Math.max(1, contentWidth - SUB_INDENT.length), "…"));
+		rows.push(fg("dim", lead) + truncateToWidth(fg("toolOutput", line), Math.max(1, contentWidth - lead.length), "…"));
 	}
 	if (preview.hidden > 0 && preview.mode === "head") rows.push(note(`… ${preview.hidden} more lines`));
 	return rows;
@@ -471,9 +473,10 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	// the total count and the expand hint. A single-tool block is just its line.
 	const visible = group.expanded ? group.tools : [pickCollapsedTool(group.tools)];
 	visible.forEach((tool, index) => {
-		const rail = group.tools.length === 1 ? "" : index === visible.length - 1 ? RAIL_END : RAIL_MID;
+		const isLast = index === visible.length - 1;
+		const rail = group.tools.length === 1 ? "" : isLast ? RAIL_END : RAIL_MID;
 		lines.push(toolLine(rail, tool, now, contentWidth));
-		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth));
+		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth, isLast ? SUB_INDENT : SUB_INDENT_RAIL));
 	});
 
 	if (state === "running") ensureAnimation();
