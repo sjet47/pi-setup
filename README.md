@@ -29,7 +29,7 @@ pi install git:github.com/sjet47/pi-setup@v0.1.0
 | `pi-inline-skill/` | Highlight `$skill` aliases and route inline skill references via `/skill:name` | [pi-inline-skill-identifier](https://github.com/kaushikgopal/pi-kaush/tree/main/extensions/pi-inline-skill-identifier) |
 | `pi-wakatime/` | Track Pi sessions, file activity and AI line changes with WakaTime | [ttttmr/pi-wakatime](https://github.com/ttttmr/pi-wakatime) |
 | `pi-cache-graph/` | Inspect context-cache hit rates, token statistics, and export CSV data | [championswimmer/pi-cache-graph](https://github.com/championswimmer/pi-cache-graph) |
-| `pi-footer/` | Show the session name (`/name`) at the right edge of the input box border, Claude Code style — pi's native status spinners share the same line | [local] |
+| `pi-footer/` | Input box top border: session name (`/name`) at the right edge plus a live TPS stats line, sharing the line with pi's native status spinners (absorbed `pi-tps`, no waterfall) | [local] + [summertime-wu/pi-tps](https://github.com/summertime-wu/pi-tps) |
 | `pi-compact-calls/` | Fold consecutive built-in tool calls into one compact block (`Ctrl+O` expands per-tool result previews) | [local] |
 | `pi-wordle/` | Play Wordle: `/wordle` activates the (hidden-by-default) wordle tools & the model plays the daily puzzle, tracking streak/stats | [local] |
 | `pi-note/` | Project-level file memory (`MEMORY.md` index + one file per topic) and a per-session scratchpad dir — Claude Code style, browsable with `/memory` | [local] |
@@ -44,6 +44,16 @@ pi remove npm:@tifan/pi-recap
 ```
 
 Then run `/reload`. The existing `$PI_CODING_AGENT_DIR/extensions/pi-recap.json` (by default `~/.pi/agent/extensions/pi-recap.json`) and saved session recaps remain compatible. `/recap`, `/recap status`, `/recap config`, and automatic recap behavior are unchanged. See [pi-recap](extensions/pi-recap/README.md) for details.
+
+### Migrating pi-tps
+
+`pi-footer` absorbed [pi-tps](https://github.com/summertime-wu/pi-tps): the live TPS stats line now renders in the input box's top border, and the multi-line waterfall timeline was dropped. Remove the standalone package so two TPS displays don't run at once:
+
+```bash
+pi remove npm:pi-tps
+```
+
+Then run `/reload`. `~/.pi/agent/pi-tps.json` is no longer read — border settings live in `~/.pi/agent/pi-footer.json` and are edited with `/pi-footer` (`showStats` / `showTtft` / `colorPreset`). See [pi-footer](extensions/pi-footer/README.md) for the layout, the narrow-terminal degradation order and the stats definitions.
 
 ### Usage statistics
 

@@ -1,0 +1,461 @@
+/**
+ * Pure TPS stats logic for pi-footer.
+ *
+ * Ported from `pi-tps` (github.com/summertime-wu/pi-tps) with the multi-line
+ * waterfall timeline dropped: only the single stats line survives, and instead
+ * of a standalone widget above the editor it is rendered into the input box's
+ * top border, next to the session name.
+ *
+ * Nothing in here touches the pi runtime — every timestamp is passed in as a
+ * `now` argument — so it is unit-testable with plain `node --test` (see
+ * tests/tps.test.ts).
+ */
+
+import { visibleWidth } from "@earendil-works/pi-tui";
+
+// ── formatting ───────────────────────────────────────────────────────────
+
+export function formatNum(num: number): string {
+	if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + "M";
+	if (num >= 1_000) return (num / 1_000).toFixed(1) + "k";
+	return num.toFixed(0);
+}
+
+export function formatDuration(ms: number): string {
+	const s = ms / 1000;
+	if (s >= 60) return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
+	return s.toFixed(1) + "s";
+}
+
+// ── snapshot ─────────────────────────────────────────────────────────────
+
+/** Everything the stats line needs, frozen at read time. */
+export interface TpsSnapshot {
+	/** Smoothed tokens/s, rounded; null until one output token is known. */
+	tps: number | null;
+	/** Tokens sent so far in this agent run (sum of the finished messages). */
+	inputTokens: number;
+	inputKnown: boolean;
+	/** Tokens generated so far in this agent run. */
+	outputTokens: number;
+	toolCount: number;
+	ttftMs: number | null;
+	thinkTokens: number | null;
+	llmDurationMs: number | null;
+}
+
+export interface TpsUsage {
+	input?: number;
+	output?: number;
+}
+
+export interface TpsDelta {
+	/** Characters of assistant text received. */
+	text?: number;
+	/** Characters of thinking received. */
+	thinking?: number;
+	/** Set when the message carries thinking content without deltas. */
+	hasThinkingContent?: boolean;
+	usage?: TpsUsage;
+}
+
+// Tuning constants carried over from upstream.
+const REFRESH_MS = 80; // throttle for the EMA update
+const EMA_WEIGHT = 0.15;
+const MIN_ELAPSED_S = 0.05;
+const THINK_CHARS_PER_TOKEN = 4;
+const TEXT_CHARS_PER_TOKEN = 3.5;
+
+/**
+ * Event-driven TPS state machine.
+ *
+ * Mirrors the numbers pi-tps showed: tokens/s smoothed over the current
+ * message's pure generation window, cumulative input/output per agent run,
+ * per-run tool count, TTFT and the LLM call duration.
+ */
+export class TpsTracker {
+	private working = false;
+	/** pi's `turn` only — `before_provider_request` outside a turn (compaction) is ignored. */
+	private turnActive = false;
+	private requestSentTime = 0;
+
+	private messageLive = false;
+	private msgStartTime = 0;
+	private msgEndTime = 0;
+	private msgRequestSentTime = 0;
+	private msgStartInputTokens = 0;
+	private liveUsageInput = 0;
+	private liveUsageOutput = 0;
+	private firstContentTime = 0;
+	private textStartTime = 0;
+	private streamedTextLen = 0;
+	private streamedThinkLen = 0;
+	private lastEmaAt = 0;
+	private smoothedTps = 0;
+
+	private totalInput = 0;
+	private totalOutput = 0;
+	private toolCount = 0;
+	private hasRun = false;
+
+	/** Start of an agent run: drop everything, including the frozen last-turn numbers. */
+	agentStart(): void {
+		this.working = true;
+		this.turnActive = false;
+		this.requestSentTime = 0;
+		this.messageLive = false;
+		this.msgStartTime = 0;
+		this.msgEndTime = 0;
+		this.msgRequestSentTime = 0;
+		this.msgStartInputTokens = 0;
+		this.liveUsageInput = 0;
+		this.liveUsageOutput = 0;
+		this.firstContentTime = 0;
+		this.textStartTime = 0;
+		this.streamedTextLen = 0;
+		this.streamedThinkLen = 0;
+		this.lastEmaAt = 0;
+		this.smoothedTps = 0;
+		this.totalInput = 0;
+		this.totalOutput = 0;
+		this.toolCount = 0;
+		this.hasRun = false;
+	}
+
+	turnStart(): void {
+		this.turnActive = true;
+	}
+
+	turnEnd(): void {
+		this.turnActive = false;
+		this.requestSentTime = 0;
+	}
+
+	beforeProviderRequest(now: number): void {
+		if (this.turnActive) this.requestSentTime = now;
+	}
+
+	messageStart(now: number, usage?: TpsUsage): void {
+		this.hasRun = true;
+		this.messageLive = true;
+		this.msgStartTime = now;
+		this.msgEndTime = 0;
+		this.msgRequestSentTime = this.requestSentTime;
+		this.msgStartInputTokens = usage?.input ?? 0;
+		this.liveUsageInput = usage?.input ?? 0;
+		this.liveUsageOutput = usage?.output ?? 0;
+		this.firstContentTime = 0;
+		this.textStartTime = 0;
+		this.streamedTextLen = 0;
+		this.streamedThinkLen = 0;
+		this.lastEmaAt = 0;
+	}
+
+	messageDelta(now: number, delta: TpsDelta): void {
+		if (delta.text) this.streamedTextLen += delta.text;
+		if (delta.thinking) this.streamedThinkLen += delta.thinking;
+		if (delta.usage) {
+			this.liveUsageInput = delta.usage.input ?? this.liveUsageInput;
+			this.liveUsageOutput = delta.usage.output ?? this.liveUsageOutput;
+		}
+
+		const hasContent =
+			this.streamedTextLen > 0 || this.streamedThinkLen > 0 || (delta.hasThinkingContent ?? false);
+		// First content (text or thinking) marks TTFT; first text delta ends thinking.
+		if (this.firstContentTime === 0 && hasContent) this.firstContentTime = now;
+		if (this.textStartTime === 0 && (delta.text ?? 0) > 0) this.textStartTime = now;
+
+		this.refreshTps(now, this.estimateOutputTokens());
+	}
+
+	messageEnd(now: number, usage?: TpsUsage): void {
+		if (!this.messageLive) return;
+		this.messageLive = false;
+		this.msgEndTime = now;
+
+		const output = usage?.output && usage.output > 0 ? usage.output : this.estimateOutputTokens();
+		// Re-smooth once with the exact token count (upstream does the same).
+		this.refreshTps(now, output);
+
+		this.totalInput += Math.max(usage?.input ?? 0, this.msgStartInputTokens);
+		this.totalOutput += output;
+		this.liveUsageInput = 0;
+		this.liveUsageOutput = 0;
+	}
+
+	toolStart(): void {
+		this.toolCount++;
+	}
+
+	/** Agent run finished: keep the numbers, switch the line to its muted idle look. */
+	agentEnd(): void {
+		this.working = false;
+		this.turnActive = false;
+		this.requestSentTime = 0;
+	}
+
+	/** Current numbers, or null when this agent run produced nothing yet. */
+	snapshot(now: number): TpsSnapshot | null {
+		if (!this.hasRun) return null;
+
+		const live = this.messageLive;
+		const currentOutput = live ? Math.max(this.liveUsageOutput, this.estimateOutputTokens()) : 0;
+		const currentInput = live ? Math.max(this.liveUsageInput, this.msgStartInputTokens) : 0;
+		const inputTokens = this.totalInput + currentInput;
+		const outputTokens = this.totalOutput + currentOutput;
+
+		const base = this.msgRequestSentTime > 0 ? this.msgRequestSentTime : this.msgStartTime;
+		const end = live ? now : this.msgEndTime;
+		const ttftMs = this.firstContentTime > 0 && base > 0 ? Math.max(this.firstContentTime - base, 0) : null;
+		const llmDurationMs = base > 0 ? Math.max(end - base, 0) : null;
+		const thinkTokens = Math.floor(this.streamedThinkLen / THINK_CHARS_PER_TOKEN);
+
+		return {
+			tps: this.smoothedTps > 0 ? Math.round(this.smoothedTps) : null,
+			inputTokens,
+			inputKnown: inputTokens > 0,
+			outputTokens,
+			toolCount: this.toolCount,
+			ttftMs,
+			thinkTokens: thinkTokens > 0 ? thinkTokens : null,
+			llmDurationMs,
+		};
+	}
+
+	get isWorking(): boolean {
+		return this.working;
+	}
+
+	private refreshTps(now: number, tokens: number): void {
+		if (tokens <= 0) return;
+		if (this.lastEmaAt > 0 && now - this.lastEmaAt < REFRESH_MS) return;
+		this.lastEmaAt = now;
+
+		const elapsed = Math.max((now - this.generationStart()) / 1000, MIN_ELAPSED_S);
+		const raw = tokens / elapsed;
+		this.smoothedTps = this.smoothedTps === 0 ? raw : EMA_WEIGHT * raw + (1 - EMA_WEIGHT) * this.smoothedTps;
+	}
+
+	/** TPS window: text generation > first content > message start. */
+	private generationStart(): number {
+		return this.textStartTime || this.firstContentTime || this.msgStartTime;
+	}
+
+	private estimateOutputTokens(): number {
+		return (
+			Math.floor(this.streamedThinkLen / THINK_CHARS_PER_TOKEN) +
+			Math.floor(this.streamedTextLen / TEXT_CHARS_PER_TOKEN)
+		);
+	}
+}
+
+// ── colors ───────────────────────────────────────────────────────────────
+
+export type StatsRole = "core" | "input" | "output" | "tools" | "ttft" | "think" | "duration";
+export type StatsColor = (role: StatsRole, text: string) => string;
+
+/** 256-color codes inherited from pi-tps' `colorPreset` table. */
+const PRESET_CODES: Record<string, Record<StatsRole, number>> = {
+	morandi: { core: 252, input: 244, output: 108, tools: 67, ttft: 180, think: 103, duration: 244 },
+	forest: { core: 250, input: 243, output: 114, tools: 109, ttft: 187, think: 101, duration: 243 },
+	ocean: { core: 252, input: 244, output: 80, tools: 68, ttft: 117, think: 67, duration: 244 },
+	retro: { core: 254, input: 242, output: 106, tools: 103, ttft: 215, think: 95, duration: 242 },
+	ice: { core: 254, input: 247, output: 152, tools: 146, ttft: 152, think: 146, duration: 247 },
+	dusk: { core: 254, input: 246, output: 182, tools: 110, ttft: 181, think: 140, duration: 246 },
+	mono: { core: 254, input: 242, output: 247, tools: 245, ttft: 250, think: 239, duration: 242 },
+	nord: { core: 252, input: 244, output: 110, tools: 67, ttft: 180, think: 61, duration: 244 },
+};
+
+export const PRESET_NAMES = Object.keys(PRESET_CODES);
+
+const RESET = "\x1b[0m";
+const paint = (code: number) => (text: string) => `\x1b[38;5;${code}m${text}${RESET}`;
+
+/** Colorizer for one of the inherited 256-color presets. */
+export function presetColor(name: string): StatsColor {
+	const codes = PRESET_CODES[name] ?? PRESET_CODES.mono;
+	return (role, text) => paint(codes[role])(text);
+}
+
+/** Idle look of a preset: everything in its muted shade. */
+export function presetIdleColor(name: string): StatsColor {
+	const codes = PRESET_CODES[name] ?? PRESET_CODES.mono;
+	return (_role, text) => paint(codes.duration)(text);
+}
+
+// ── stats line ───────────────────────────────────────────────────────────
+
+type StatsKey = "core" | "tokens" | "tools" | "ttft" | "think" | "duration";
+
+interface StatsSegment {
+	key: StatsKey;
+	parts: { role: StatsRole; text: string }[];
+}
+
+/**
+ * Drop order when the line does not fit — least useful first, so the core
+ * `⚡Nt/s` is the very last thing to go. Detail (tools / thinking / duration)
+ * goes before TTFT, TTFT before the token counts.
+ */
+const DROP_ORDER: StatsKey[] = ["duration", "think", "tools", "ttft", "tokens", "core"];
+
+export interface StatsLineOptions {
+	showTtft: boolean;
+	maxWidth: number;
+	color: StatsColor;
+}
+
+/**
+ * The stats line, already degraded to `maxWidth` (returns "" when even the
+ * core segment does not fit). Segments keep a stable visual order; shrinking
+ * only ever removes trailing detail, never reorders.
+ */
+export function buildStatsLine(s: TpsSnapshot, o: StatsLineOptions): string {
+	if (o.maxWidth <= 0) return "";
+
+	let segments = statsSegments(s, o.showTtft);
+	if (segments.length === 0) return "";
+
+	let rendered = renderSegments(segments, o.color);
+	while (segments.length > 1 && rendered.width > o.maxWidth) {
+		segments = dropLowest(segments);
+		rendered = renderSegments(segments, o.color);
+	}
+
+	return rendered.width <= o.maxWidth ? rendered.text : "";
+}
+
+function statsSegments(s: TpsSnapshot, showTtft: boolean): StatsSegment[] {
+	const tokens: StatsSegment["parts"] = [];
+	if (s.inputKnown) tokens.push({ role: "input", text: `↑${formatNum(s.inputTokens)}` });
+	if (s.outputTokens > 0) tokens.push({ role: "output", text: `↓${formatNum(s.outputTokens)}` });
+
+	// Everything hangs off the core segment: until there is a token count, a TPS
+	// estimate or a tool call, a bare "⏳1.9s" would just be noise on the border.
+	if (tokens.length === 0 && s.tps === null && s.toolCount === 0) return [];
+
+	const segments: StatsSegment[] = [
+		{ key: "core", parts: [{ role: "core", text: s.tps !== null ? `⚡${s.tps}t/s` : "⚡…" }] },
+	];
+	if (tokens.length > 0) segments.push({ key: "tokens", parts: tokens });
+	if (s.toolCount > 0) segments.push({ key: "tools", parts: [{ role: "tools", text: `🔧${s.toolCount}` }] });
+	if (showTtft && s.ttftMs !== null) {
+		segments.push({ key: "ttft", parts: [{ role: "ttft", text: `⏱${formatDuration(s.ttftMs)}` }] });
+	}
+	if (s.thinkTokens !== null) {
+		segments.push({ key: "think", parts: [{ role: "think", text: `🧠${formatNum(s.thinkTokens)}` }] });
+	}
+	if (s.llmDurationMs !== null) {
+		segments.push({ key: "duration", parts: [{ role: "duration", text: `⏳${formatDuration(s.llmDurationMs)}` }] });
+	}
+
+	return segments;
+}
+
+function dropLowest(segments: StatsSegment[]): StatsSegment[] {
+	for (const key of DROP_ORDER) {
+		const index = segments.findIndex((segment) => segment.key === key);
+		if (index >= 0) {
+			const next = segments.slice();
+			next.splice(index, 1);
+			return next;
+		}
+	}
+	return segments;
+}
+
+function renderSegments(segments: StatsSegment[], color: StatsColor): { text: string; width: number } {
+	const text = segments
+		.map((segment) => segment.parts.map((part) => color(part.role, part.text)).join(" "))
+		.join(" ");
+	return { text, width: visibleWidth(text) };
+}
+
+// ── top border layout ────────────────────────────────────────────────────
+
+export interface TopBorderInput {
+	width: number;
+	/** Already colored ` name `, or "" when the session has no name. */
+	nameLabel: string;
+	/** Border colorizer (the Editor's `borderColor`). */
+	border: (text: string) => string;
+	/** Render the stats line within `maxWidth`; return "" when it does not fit. */
+	renderStats: (maxWidth: number) => string;
+	/** Render the inline working status within `allowance`; return "" when there is none. */
+	renderStatus: (allowance: number) => string;
+}
+
+const TAIL_WIDTH = 1; // the single "─" closing the right block
+const SEP_WIDTH = 2; // gap between the stats line and the session name
+const FILL_MIN = 1; // at least one dash between the status block and the right block
+const STATUS_BLOCK_MIN = 5; // "── " + one indicator column + " "
+
+/**
+ * Compose the top border:
+ *
+ *   ── <working status> ───── <stats>  <session name> ─
+ *
+ * Width is conserved exactly. Allocation priority: session name (fixed) →
+ * working status (its natural width, capped at a third of the row) → stats
+ * (elastic, degrades segment by segment down to nothing).
+ */
+export function composeTopBorder(input: TopBorderInput): string {
+	// The session name is the last thing to go, but on a border narrower than the
+	// label itself it has to give way — then there is nothing left to keep.
+	const requestedNameWidth = input.nameLabel ? visibleWidth(input.nameLabel) : 0;
+	const nameWidth = requestedNameWidth + TAIL_WIDTH <= input.width ? requestedNameWidth : 0;
+	const nameLabel = nameWidth > 0 ? input.nameLabel : "";
+	const nameBlock = nameWidth > 0 ? nameWidth + TAIL_WIDTH : 0;
+
+	// 1) How much room does the working status want?
+	const naturalStatus = input.renderStatus(Math.max(0, input.width - STATUS_BLOCK_MIN));
+	const naturalStatusBlock = naturalStatus
+		? 3 + visibleWidth(naturalStatus) + 1
+		: 0;
+	const statusReserve = Math.min(
+		naturalStatusBlock,
+		Math.max(STATUS_BLOCK_MIN, Math.floor(input.width / 3)),
+	);
+
+	// 2) Stats take what is left after the status reserve — and after whatever the
+	// right block needs for its own gap and closing dash.
+	const statsBudget = Math.max(
+		0,
+		input.width - nameBlock - statusReserve - FILL_MIN - (nameWidth > 0 ? SEP_WIDTH : TAIL_WIDTH),
+	);
+	let stats = statsBudget > 0 ? input.renderStats(statsBudget) : "";
+	if (!stats) stats = "";
+	let statsWidth = visibleWidth(stats);
+	let sepWidth = statsWidth > 0 && nameWidth > 0 ? SEP_WIDTH : 0;
+
+	// 3) The status gets the remaining room (same allowance pi uses natively).
+	// `room` already contains the fill, so the allowance is `room - STATUS_BLOCK_MIN`.
+	let room = input.width - nameBlock - statsWidth - sepWidth;
+	let status = room > 0 ? input.renderStatus(Math.max(0, room - STATUS_BLOCK_MIN)) : "";
+	let statusBlock = status ? 3 + visibleWidth(status) + 1 : 0;
+
+	// 4) Last resort on very narrow terminals: drop the stats, keep the spinner.
+	if (statusBlock > 0 && input.width - statusBlock - FILL_MIN < statsWidth + sepWidth + nameBlock) {
+		stats = "";
+		statsWidth = 0;
+		sepWidth = 0;
+		room = input.width - nameBlock;
+		status = room > 0 ? input.renderStatus(Math.max(0, room - STATUS_BLOCK_MIN)) : "";
+		statusBlock = status ? 3 + visibleWidth(status) + 1 : 0;
+	}
+
+	const tailWidth = statsWidth + nameWidth > 0 ? TAIL_WIDTH : 0;
+	const fill = Math.max(
+		0,
+		input.width - statusBlock - statsWidth - sepWidth - nameWidth - tailWidth,
+	);
+
+	const head = status ? `── ${status} ` : "";
+	const right =
+		(statsWidth > 0 ? stats : "") +
+		(sepWidth > 0 ? "  " : "") +
+		nameLabel +
+		(tailWidth > 0 ? input.border("─") : "");
+
+	return head + input.border("─".repeat(fill)) + right;
+}

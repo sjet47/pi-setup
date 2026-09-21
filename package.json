@@ -10,12 +10,13 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "typecheck:cache-graph": "tsc --noEmit -p extensions/pi-cache-graph/tsconfig.json",
-    "test": "npm run test:wakatime && npm run test:cache-graph && npm run test:wordle && npm run test:note && npm run test:recap",
+    "test": "npm run test:wakatime && npm run test:cache-graph && npm run test:wordle && npm run test:note && npm run test:recap && npm run test:footer",
     "test:wakatime": "node --import tsx --test extensions/pi-wakatime/test/*.test.ts",
     "test:cache-graph": "vitest run --config extensions/pi-cache-graph/vitest.config.ts",
     "test:wordle": "node --import tsx --test extensions/pi-wordle/test/*.test.ts",
     "test:note": "node --import tsx --test extensions/pi-note/test/*.test.ts",
-    "test:recap": "vitest run --config extensions/pi-recap/vitest.config.ts"
+    "test:recap": "vitest run --config extensions/pi-recap/vitest.config.ts",
+    "test:footer": "node --import tsx --test extensions/pi-footer/tests/*.test.ts"
   },
   "pi": {
     "extensions": [
