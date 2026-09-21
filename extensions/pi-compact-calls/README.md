@@ -61,7 +61,7 @@
 | 失败行的错误末行 | 输出的最后一个非空行；bash 的 `Command exited with code N` 没有信息量，取它的上一行并追加 `(exit N)`，同时去掉 `/bin/bash: line 1: ` 前缀；无输出时只显示 `exit N` |
 | 中断（Esc） | 没执行的调用不会显示 `✓`：pi 给出 `Operation aborted` 结果的显示 `✗`，没有任何结果的保持 `○` |
 | 恢复历史会话 / `/tree` / `/reload` 重放 | 重放的工具行没有实时事件，无法分块，退化成单行紧凑行（`✓ edit: poem.txt +2 −0`）；有结果所以是 `✓`/`✗` 而不是 `○` |
-| thinking | 完全不碰，继续由 pi 原生渲染成 `Thinking...` 行（可点击展开全文） |
+| thinking | 清空 pi 的隐藏 thinking 标签：`session_start` 里调 `ctx.ui.setHiddenThinkingLabel("")`（`Text("")` 渲染 0 行），所以多步思考的轮次不会在折叠块周围堆出一串 `Thinking...` 行。thinking 内容静默吸收（块头不计数、展开态不渲染）；想看全文用 pi 自带的 thinking 开关（`app.thinking.toggle`）切到 visible |
 
 ### 为什么跨消息合并、只在正文处断开
 
@@ -76,7 +76,7 @@
 
 ## 实现要点
 
-- **不 patch 任何 prototype**。分块靠「leader 行」：每组第一个工具行渲染整块，其他成员渲染 0 行。
+- **不 patch 任何 prototype**。分块靠「leader 行」：每组第一个工具行渲染整块，其他成员渲染 0 行。thinking 行用公开 API `ctx.ui.setHiddenThinkingLabel` 处理，仍然零 patch。
 - 0 行必须配合 `renderShell: "self"`：默认 shell 下即使内容为空，`ToolExecutionComponent` 自带的 `Spacer(1)` 仍会留下一个空行。
 - 工具定义用 `{ ...createXTool(cwd), renderShell: "self", renderCall, renderResult }` 注册，因此 **description / promptSnippet / promptGuidelines / constrainedSampling 和原生 execute 全部保留**，只替换渲染。（对照：pi-compact-ui 手写定义，把描述退化成 `Built-in bash (rendering handled by compact-ui group)`，并丢掉 0.86.1 的 strict JSON-schema 采样。）
 - pi 每帧全量重渲染整棵树、不做 dirty 跳过，所以 leader 会自动带上后加入的工具；重绘由 pi 自己的工具事件 + 我们的 spinner 定时器（100ms）驱动，定时器复用 `context.invalidate()`（内部已调 `ui.requestRender()`），因此**不需要通过 widget 去偷 TUI 实例**。
@@ -99,6 +99,10 @@ node --test tests/*.test.ts
 - 重放行的展开态（`Ctrl+O`）依赖 `renderCall` 的 `context.expanded`，`isError` 依赖 `context.isError`（重放时也可用）；但 `renderResult` 拿到的 result 对象**不含** `isError`，不要用它覆盖状态。
 - 块上**点击**展开依赖该行的 result 已经存在（pi 的 `createResultRegion` 先判 `this.result`），所以第一个工具还在跑时点击无效；`Ctrl+O` 任何时候都好用。
 - 非内置工具不参与分块（我们只能控制自己注册的工具行）。
+- **thinking 标记全局消失**：清空 hidden thinking label 是个全局开关，带正文的最终回答前那一行 `Thinking...` 也一起没了；条带消息上「这里思考过」的标记与点击展开入口都随之消失（`app.thinking.toggle` 仍可切到 visible 看全文）。这是 2026-09-21 与用户确认过的取舍：不 patch pi 内部组件就换不来「只隐藏被折叠进块的那些 thinking」。
+- thinking 行本身不占空间：清空 label 后 pi 渲染的是 `Text("")`（宽度无关，渲染 0 行），效果等同于「折叠块吸收了这一步的思考」，但块头不做计数（静默吸收）。
+- 折叠块的展开态（`Ctrl+O`）不显示 thinking 文本 —— 我们没存内容副本；要支持得先在 message 事件里存一份（目前不需要）。
+- label 由 pi 在 `resetExtensionUI` 时重置回默认值，所以每个 `session_start`（含 `/reload`、切会话、`/new`、fork）都要重新清一次；`app.thinking.toggle` 与 `/settings` 里的 thinking 开关不会把它重置。
 - 单工具块没有块头，所以第一个调用的参数刚开始流式生成时是 1 行（`○ bash: …`），第二个调用出现后变成 2 行（块头 + 活动行）—— 这 1 → 2 的增长是设计使然，不是闪烁。
 - 单工具块的工具行在执行完后就显示 `✓`（那个调用确实成功了）；「块未封口不显示 `✓`」只约束块头。
 - 常量（都在 `index.ts` 顶部，没有配置文件）：结果预览 `EXPANDED_RESULT_LINES = 5`、diff 预览 `EXPANDED_DIFF_LINES = 20`、结果保留 `RESULT_TEXT_LIMIT = 4000`（bash 留尾部，其他留头部，按整行裁；完整行数另存，所以 `… N` 行数是真实的）、diff 保留 `DIFF_TEXT_LIMIT = 8000`。摘要没有固定字符上限（`format.ts` 的 `SUMMARY_HARD_LIMIT = 240` 只是防御性上限，实际长度由终端宽度决定）。折叠态固定只显示 1 条活动行，没有对应常量。
@@ -155,3 +159,16 @@ tmux 实机（`pi -ne -e extensions/pi-compact-calls/index.ts`）：
 - 一句正文 + 并行 `echo F1` / `echo F2`，下一条消息无正文再 `echo F3` → **合成一块** `✓ 3 tool calls · 0.0s · Ctrl+O to expand` ✓
 - 再输出一句正文后调用 `echo F4` → 另起单行 `✓ bash: echo F4 (0.0s)` ✓
 - 触发原始 bug 的场景（正文 + 同一条消息里 read/grep 或 write/edit，正文较长时 `text_end` 会在工具行建好后到达）在新代码下不再劈成多个单成员块 ✓
+
+## 验证记录（2026-09-21 第四轮，thinking 行收敛）
+
+做法：`session_start` 里 `ctx.ui.setHiddenThinkingLabel("")`（公开 API，零 patch）。pi 0.86.1 的 `setHiddenThinkingLabel` 只在参数为 `null`/`undefined` 时回退默认值，`""` 会保留。
+
+tmux 实机（`pi -ne -e extensions/pi-compact-calls/index.ts`，120 列，每 2s `capture-pane`，共 120s 覆盖流式/执行/收尾全阶段）：
+
+- 「一步一步串行执行 echo A1 / A2 / A3」→ 三次串行 bash **合成一块** `✓ 3 tool calls · 0.1s · Ctrl+O to expand` + `└ ✓ bash: echo A3 (0.0s)`；紧随其后是最终正文 ✓
+- 整段 60 次 capture 里 `Thinking...` 出现 **0 次**（修复前该场景会堆出 2 行）✓
+- 会话 JSONL 核对（证明这次真的产生了 thinking，不是无效验证）：3 条 assistant 消息里 2 条带 thinking 块（176 / 11 字符），结构为 `['thinking','toolCall']` ✓
+- 最终正文正常显示，无多余空行 ✓
+
+未在本轮实机覆盖：`app.thinking.toggle` 切到 visible 后 thinking 全文仍正常渲染（代码路径上 label 只在 hidden 时使用，但未实机点过）。
