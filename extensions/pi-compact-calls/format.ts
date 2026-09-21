@@ -68,18 +68,39 @@ export function formatDuration(ms: number): string {
 	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+/** A multi-line command shows its first non-empty line plus " …". */
+function bashSummary(command: unknown): string {
+	if (typeof command !== "string") return "…";
+	const lines = command.split("\n").filter((line) => line.trim().length > 0);
+	if (lines.length === 0) return "…";
+	return lines.length > 1 ? `${oneLine(lines[0], SUMMARY_HARD_LIMIT - 2)} …` : oneLine(lines[0]);
+}
+
+/** read's 1-based offset/limit as `:120-180`, `:120+` (offset only) or `:1-50` (limit only). */
+function readRange(offset: unknown, limit: unknown): string {
+	const hasOffset = typeof offset === "number" && Number.isFinite(offset) && offset > 0;
+	const hasLimit = typeof limit === "number" && Number.isFinite(limit) && limit > 0;
+	if (!hasOffset && !hasLimit) return "";
+	const first = hasOffset ? Math.floor(offset as number) : 1;
+	return hasLimit ? `:${first}-${first + Math.floor(limit as number) - 1}` : `:${first}+`;
+}
+
 export function summaryOf(name: string, rawArgs: any): string {
 	const args: any = rawArgs ?? {};
 	switch (name) {
 		case "bash":
-			return oneLine(args.command ?? "…");
+			return bashSummary(args.command);
 		case "read":
+			return oneLine(shortenPath(String(args.path ?? "…")) + readRange(args.offset, args.limit));
 		case "write":
 		case "edit":
 			return oneLine(shortenPath(String(args.path ?? "…")));
 		case "find":
-		case "grep":
 			return oneLine(`${args.pattern ?? ""} in ${shortenPath(String(args.path ?? "."))}`);
+		case "grep": {
+			const glob = typeof args.glob === "string" && args.glob.length > 0 ? ` [${args.glob}]` : "";
+			return oneLine(`${args.pattern ?? ""} in ${shortenPath(String(args.path ?? "."))}${glob}`);
+		}
 		case "ls":
 			return oneLine(shortenPath(String(args.path ?? ".")));
 		default: {
