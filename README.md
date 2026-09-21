@@ -29,7 +29,7 @@ pi install git:github.com/sjet47/pi-setup@v0.1.0
 | `pi-inline-skill/` | Highlight `$skill` aliases and route inline skill references via `/skill:name` | [pi-inline-skill-identifier](https://github.com/kaushikgopal/pi-kaush/tree/main/extensions/pi-inline-skill-identifier) |
 | `pi-wakatime/` | Track Pi sessions, file activity and AI line changes with WakaTime | [ttttmr/pi-wakatime](https://github.com/ttttmr/pi-wakatime) |
 | `pi-cache-graph/` | Inspect context-cache hit rates, token statistics, and export CSV data | [championswimmer/pi-cache-graph](https://github.com/championswimmer/pi-cache-graph) |
-| `pi-footer/` | Show the session name (`/name`) at the right edge of the input box border, Claude Code style | [local] |
+| `pi-footer/` | Show the session name (`/name`) at the right edge of the input box border, Claude Code style — pi's native status spinners share the same line | [local] |
 | `pi-wordle/` | Play Wordle: `/wordle` activates the (hidden-by-default) wordle tools & the model plays the daily puzzle, tracking streak/stats | [local] |
 | `pi-note/` | Project-level file memory (`MEMORY.md` index + one file per topic) and a per-session scratchpad dir — Claude Code style, browsable with `/memory` | [local] |
 | `pi-recap/` | One-line session recap on demand, on resume, or after five idle minutes; preserves the existing model config | [tifandotme/pi-extensions](https://github.com/tifandotme/pi-extensions/tree/master/packages/pi-recap) |

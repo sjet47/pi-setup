@@ -3,20 +3,37 @@ import { visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui
 
 /**
  * Editor subclass that renders the current session name (set via /name) into
- * the right edge of the input box's top border, Claude Code style:
+ * the right edge of the input box's top border, Claude Code style, while
+ * keeping pi's native status spinners (working / compaction / retry / branch
+ * summary) embedded in the same border line:
  *
- *   ──────────────────────────────── feat/auth ─
+ *   ── ⠼ Working ────────────────── feat/auth ─
  *    input text…
- *   ─────────────────────────────────────────────
+ *   ───────────────────────────────────────────
+ *
+ * Idle (unchanged from before):
+ *
+ *   ───────────────────────────── feat/auth ─
+ *    input text…
+ *   ───────────────────────────────────────────
+ *
+ * Embedding requires the `embedWorkingStatus` opt-in; without it pi falls back
+ * to a standalone status row above the input box. pi's own top-border renderer
+ * cannot be reused directly once a label is set (it owns the whole line), so
+ * this override rebuilds the same layout with the label appended on the right.
  *
  * The label only appears while an explicit session name is set — pi's
  * getSessionName() returns undefined otherwise. When editor content is scrolled
- * (hidden lines above), the top border shows the "↑ n more" indicator instead;
- * the label is skipped in that case so the scroll indicator stays intact.
+ * (hidden lines above), pi's renderer keeps ownership so its "↑ n more"
+ * overflow indicator and optional status stay intact; the label is skipped in
+ * that case.
  */
 class SessionNameEditor extends CustomEditor {
 	private readonly getName: () => string | undefined;
 	private readonly color: (text: string) => string;
+	// Captured from setWorkingStatusIndicator(): CustomEditor keeps its own copy
+	// private, and the border renderer needs the rendered status text.
+	private indicator: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0] | undefined;
 
 	constructor(
 		tui: TUI,
@@ -25,13 +42,19 @@ class SessionNameEditor extends CustomEditor {
 		getName: () => string | undefined,
 		color: (text: string) => string,
 	) {
-		super(tui, theme, keybindings);
+		super(tui, theme, keybindings, { embedWorkingStatus: true });
 		this.getName = getName;
 		this.color = color;
 	}
 
+	override setWorkingStatusIndicator(indicator: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]): void {
+		super.setWorkingStatusIndicator(indicator);
+		this.indicator = indicator;
+	}
+
 	override renderTopBorder(width: number, hiddenLineCount: number): string {
-		// Keep the "↑ n more" scroll indicator when lines are hidden above.
+		// Keep pi's "↑ n more" scroll indicator (and its status layout) when lines
+		// are hidden above.
 		if (hiddenLineCount > 0) return super.renderTopBorder(width, hiddenLineCount);
 
 		const name = this.getName();
@@ -43,8 +66,42 @@ class SessionNameEditor extends CustomEditor {
 		// Need room for the label plus at least one trailing dash.
 		if (labelWidth + 1 > width) return super.renderTopBorder(width, hiddenLineCount);
 
-		const fill = width - labelWidth - 1;
-		return this.borderColor("─".repeat(fill)) + label + this.borderColor("─");
+		const room = width - labelWidth - 1;
+		const status = this.renderEmbeddedStatus(room);
+		if (status === undefined) {
+			return this.borderColor("─".repeat(room)) + label + this.borderColor("─");
+		}
+
+		// `── <status> ──── label ─`, mirroring pi's `── <status> ────` left block.
+		const gap = room - 5 - visibleWidth(status);
+		if (gap < 1) {
+			return this.borderColor("─".repeat(room)) + label + this.borderColor("─");
+		}
+		return (
+			this.borderColor("── ") +
+			status +
+			this.borderColor(` ${"─".repeat(gap)}`) +
+			label +
+			this.borderColor("─")
+		);
+	}
+
+	/** Embedded status text for `room` free columns, degrading like pi does. */
+	private renderEmbeddedStatus(room: number): string | undefined {
+		const indicator = this.indicator;
+		if (!this.embedWorkingStatus || !indicator || room <= 0) return undefined;
+
+		const allowance = Math.max(1, room - 5);
+		const status = indicator.renderInBorder(allowance);
+		const statusWidth = visibleWidth(status);
+		if (statusWidth === 0) return undefined;
+		if (room - 5 - statusWidth >= 1) return status;
+
+		// Not enough room for the label + message: keep just the spinner.
+		const spinner = indicator.renderSpinnerInBorder(allowance);
+		const spinnerWidth = visibleWidth(spinner);
+		if (spinnerWidth === 0 || room - 5 - spinnerWidth < 1) return undefined;
+		return spinner;
 	}
 }
 
