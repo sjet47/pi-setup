@@ -58,11 +58,15 @@ import {
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import {
+	captureText,
 	countLines,
 	type DiffStat,
 	diffStat,
+	errorTail,
 	formatDuration,
 	pickCollapsedTool,
+	previewModeOf,
+	selectPreview,
 	summaryOf,
 	toolState,
 } from "./format.ts";
@@ -111,7 +115,12 @@ type ToolEntry = {
 	/** Set by tool_execution_start. Undefined for replayed history and for rows whose execution never started. */
 	startedAt?: number;
 	endedAt?: number;
+	/** Bounded result text: its tail for bash, its head for everything else. */
 	resultText: string;
+	/** Line count of the full result text, before it was bounded. */
+	resultLineCount: number;
+	/** Last meaningful output line, shown on the tool line when the call failed. */
+	errorTail: string;
 	/** edit only: `details.diff`, cut to whole lines within DIFF_TEXT_LIMIT. */
 	diff?: string;
 	/** edit only: counted on the full diff before it was cut. */
@@ -217,6 +226,8 @@ function ensureEntry(toolCallId: string, name: string, args: any): ToolEntry {
 			name,
 			args,
 			resultText: "",
+			resultLineCount: 0,
+			errorTail: "",
 			isError: false,
 			pending: false,
 			hasResult: false,
@@ -280,14 +291,18 @@ function entryDuration(entry: ToolEntry): string | undefined {
 	return formatDuration(end - entry.startedAt);
 }
 
-function resultTextOf(result: any): string {
+/** Keep a bounded copy of the result text (live output included) on the entry. */
+function captureResult(entry: ToolEntry, result: any): void {
 	const content = Array.isArray(result?.content) ? result.content : [];
-	const text = content
+	const full = content
 		.filter((item: any) => item?.type === "text")
 		.map((item: any) => String(item.text ?? ""))
 		.join("\n")
 		.trim();
-	return text.length > RESULT_TEXT_LIMIT ? text.slice(0, RESULT_TEXT_LIMIT) : text;
+	const captured = captureText(full, RESULT_TEXT_LIMIT, previewModeOf(entry.name));
+	entry.resultText = captured.text;
+	entry.resultLineCount = captured.totalLines;
+	entry.errorTail = errorTail(full.slice(-RESULT_TEXT_LIMIT));
 }
 
 /** Remember an edit's diff (bounded) plus the stats of the full diff. */
@@ -358,7 +373,8 @@ function toolLine(rail: string, entry: ToolEntry, now: number): string {
 		" " +
 		fg("dim", summaryOf(entry.name, entry.args)) +
 		(stat ? ` ${stat}` : "") +
-		(duration ? ` ${fg("muted", `(${duration})`)}` : "")
+		(duration ? ` ${fg("muted", `(${duration})`)}` : "") +
+		(toolState(entry) === "failed" && entry.errorTail ? ` ${fg("dim", "—")} ${fg("error", entry.errorTail)}` : "")
 	);
 }
 
@@ -389,15 +405,15 @@ function diffPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
 /** Result preview rows for an expanded block (live output included while running). */
 function resultPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
 	if (entry.diff && !entry.isError) return diffPreviewLines(entry, contentWidth);
-	if (!entry.resultText) return [];
-	const allLines = entry.resultText.split("\n");
-	const lines = allLines.slice(0, EXPANDED_RESULT_LINES);
-	const rows = lines.map((line) =>
-		fg("dim", SUB_INDENT) + truncateToWidth(fg("toolOutput", line), Math.max(1, contentWidth - SUB_INDENT.length), "…"),
-	);
-	if (allLines.length > lines.length) {
-		rows.push(`${fg("dim", SUB_INDENT)}${fg("muted", `… ${allLines.length - lines.length} more lines`)}`);
+	const preview = selectPreview(entry.resultText, EXPANDED_RESULT_LINES, previewModeOf(entry.name), entry.resultLineCount);
+	const note = (text: string) => `${fg("dim", SUB_INDENT)}${fg("muted", text)}`;
+	const rows: string[] = [];
+	// bash shows its last lines, so the omitted part comes first.
+	if (preview.hidden > 0 && preview.mode === "tail") rows.push(note(`… ${preview.hidden} earlier lines`));
+	for (const line of preview.lines) {
+		rows.push(fg("dim", SUB_INDENT) + truncateToWidth(fg("toolOutput", line), Math.max(1, contentWidth - SUB_INDENT.length), "…"));
 	}
+	if (preview.hidden > 0 && preview.mode === "head") rows.push(note(`… ${preview.hidden} more lines`));
 	return rows;
 }
 
@@ -412,7 +428,8 @@ function groupEndedAt(group: ToolGroup): number | undefined {
 function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const now = Date.now();
 	const pending = group.tools.some((tool) => tool.pending);
-	const failed = group.tools.some((tool) => tool.isError);
+	const failedCount = group.tools.filter((tool) => toolState(tool) === "failed").length;
+	const failed = failedCount > 0;
 	const icon = pending ? spinnerFrame(now) : failed ? "✗" : "✓";
 	const headColor = pending ? "accent" : failed ? "error" : "success";
 	const endedAt = pending ? now : (groupEndedAt(group) ?? now);
@@ -423,7 +440,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const lines: string[] = [];
 	if (group.tools.length > 1) {
 		lines.push(
-			`${fg(headColor, icon)} ${fg(headColor, bold(`${group.tools.length} tool call${group.tools.length === 1 ? "" : "s"}`))} ${fg("muted", `· ${formatDuration(endedAt - group.startedAt)}`)}`,
+			`${fg(headColor, icon)} ${fg(headColor, bold(`${group.tools.length} tool calls`))}${failed ? ` ${fg("muted", "·")} ${fg("error", `${failedCount} failed`)}` : ""} ${fg("muted", `· ${formatDuration(endedAt - group.startedAt)}`)}`,
 		);
 	}
 
@@ -524,7 +541,7 @@ export default function (pi: ExtensionAPI) {
 				repaint = context.invalidate;
 				const entry = entries.get(context.toolCallId);
 				if (entry) {
-					entry.resultText = resultTextOf(result);
+					captureResult(entry, result);
 					captureDetails(entry, result);
 					// NOTE: the object passed to renderResult only carries content/details —
 					// `result.isError` is undefined here and would clobber the flag set by
@@ -588,7 +605,7 @@ export default function (pi: ExtensionAPI) {
 		const entry = entries.get(event.toolCallId);
 		if (!entry) return;
 		// Streaming output: keep it visible when the block is expanded.
-		entry.resultText = resultTextOf(event.partialResult);
+		captureResult(entry, event.partialResult);
 	});
 
 	pi.on("tool_execution_end", (event) => {
@@ -598,7 +615,7 @@ export default function (pi: ExtensionAPI) {
 		entry.hasResult = true;
 		entry.endedAt = Date.now();
 		entry.isError = Boolean(event.isError);
-		entry.resultText = resultTextOf(event.result);
+		captureResult(entry, event.result);
 		captureDetails(entry, event.result);
 		if (!hasPendingTool()) stopAnimation();
 		repaint?.();

@@ -81,13 +81,16 @@ export function summaryOf(name: string, rawArgs: any): string {
 }
 
 /**
- * The single call shown while collapsed: the newest still-running call wins, and
- * once the whole batch is done the last call in it.
+ * The single call shown while collapsed: the newest still-running call wins,
+ * then the most recent failure (so a collapsed block never hides one), then the
+ * last call.
  */
 export function pickCollapsedTool<T extends ToolView>(tools: readonly T[]): T {
 	for (let index = tools.length - 1; index >= 0; index--) {
-		const tool = tools[index]!;
-		if (tool.pending) return tool;
+		if (tools[index]!.pending) return tools[index]!;
+	}
+	for (let index = tools.length - 1; index >= 0; index--) {
+		if (toolState(tools[index]!) === "failed") return tools[index]!;
 	}
 	return tools[tools.length - 1]!;
 }
@@ -114,4 +117,62 @@ export function countLines(content: unknown): number {
 	if (text.length === 0) return 0;
 	const breaks = text.split("\n").length - 1;
 	return text.endsWith("\n") ? breaks : breaks + 1;
+}
+
+/**
+ * The most telling line of a failed tool's output: its last non-empty line.
+ * bash ends every failure with "Command exited with code N", which says nothing
+ * about the cause, so the line before it is used and the code is appended.
+ */
+export function errorTail(text: string): string {
+	const lines = text
+		.split("\n")
+		.map((line) => line.replace(/\s+/g, " ").trim())
+		.filter((line) => line.length > 0);
+	const last = lines[lines.length - 1];
+	if (last === undefined) return "";
+	const exit = /^Command exited with code (\d+)$/.exec(last);
+	const before = lines[lines.length - 2];
+	if (exit && before !== undefined) return `${before} (exit ${exit[1]})`;
+	return last;
+}
+
+export type PreviewMode = "head" | "tail";
+
+/** bash output is most interesting at its end; file-ish results at their start. */
+export function previewModeOf(toolName: string): PreviewMode {
+	return toolName === "bash" ? "tail" : "head";
+}
+
+export type CapturedText = { text: string; totalLines: number };
+
+/**
+ * Bound the text kept in memory, keeping the end that the preview will show, and
+ * remember how many lines the full text had so "… N more lines" stays truthful.
+ * A line cut in half by the bound is dropped.
+ */
+export function captureText(full: string, limit: number, mode: PreviewMode): CapturedText {
+	const totalLines = full.length === 0 ? 0 : full.split("\n").length;
+	if (full.length <= limit) return { text: full, totalLines };
+	if (mode === "tail") {
+		const cut = full.slice(full.length - limit);
+		const firstBreak = cut.indexOf("\n");
+		return { text: firstBreak >= 0 ? cut.slice(firstBreak + 1) : cut, totalLines };
+	}
+	const cut = full.slice(0, limit);
+	const lastBreak = cut.lastIndexOf("\n");
+	return { text: lastBreak > 0 ? cut.slice(0, lastBreak) : cut, totalLines };
+}
+
+export type Preview = { lines: string[]; hidden: number; mode: PreviewMode };
+
+/**
+ * Pick the preview rows: the first `max` lines, or for "tail" the last `max`.
+ * `totalLines` is the line count of the full (unbounded) text.
+ */
+export function selectPreview(text: string, max: number, mode: PreviewMode, totalLines = 0): Preview {
+	if (text.length === 0 || max <= 0) return { lines: [], hidden: 0, mode };
+	const all = text.split("\n");
+	const lines = mode === "tail" ? all.slice(-max) : all.slice(0, max);
+	return { lines, hidden: Math.max(totalLines, all.length) - lines.length, mode };
 }
