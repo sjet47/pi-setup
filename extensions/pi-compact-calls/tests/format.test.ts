@@ -151,9 +151,10 @@ test("errorTail: last non-empty line, bash exit line folded in", () => {
 	assert.equal(errorTail("a\nb\n\n"), "b");
 	assert.equal(errorTail(""), "");
 	assert.equal(
-		errorTail("bash: cd: /nope: No such file or directory\n\nCommand exited with code 1"),
-		"bash: cd: /nope: No such file or directory (exit 1)",
+		errorTail("/bin/bash: line 1: cd: /nope: No such file or directory\n\nCommand exited with code 1"),
+		"cd: /nope: No such file or directory (exit 1)",
 	);
+	assert.equal(errorTail("make: *** [all] Error 2\nCommand exited with code 2"), "make: *** [all] Error 2 (exit 2)");
 	assert.equal(errorTail("Command exited with code 2"), "Command exited with code 2");
 });
 
