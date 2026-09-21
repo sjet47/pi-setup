@@ -1,16 +1,30 @@
 /**
  * pi-compact-calls — fold consecutive built-in tool calls into one compact block.
  *
- * A live turn renders as:
+ * A live turn renders as two lines while collapsed:
  *
- *   ⠋ 3 tool calls · 6.1s
+ *   ⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
+ *   └ ⠋ bash: sleep 3 && echo one (3.0s)
+ *
+ * and, after Ctrl+O, as one row per tool with a result preview (bash: last
+ * lines, edit: its diff, everything else: first lines):
+ *
+ *   ✗ 3 tool calls (2 bash, 1 edit) · 1 failed · 3.0s
  *   ├ ✓ bash: sleep 3 && echo one (3.0s)
- *   ├ ✓ bash: echo two (0.0s)
- *   └ ✓ bash: ls /tmp | head -3 (0.0s)
+ *   │   one
+ *   ├ ✓ edit: src/a.ts +2 −1 (0.0s)
+ *   │   -12 old line
+ *   │   +12 new line
+ *   └ ✗ bash: cd /nope (0.0s) — cd: /nope: No such file or directory (exit 1)
  *
- * instead of three native rows (blank / `$ cmd` / blank / output / blank /
- * `Took X.Xs` / blank each). Ctrl+O expands the block to show per-tool result
- * previews.
+ * instead of native rows (blank / `$ cmd` / blank / output / blank /
+ * `Took X.Xs` / blank each).
+ *
+ * Icons: ○ queued (args streaming, waiting, or never ran) · spinner running ·
+ * ✓ / ✗ finished. The header shows a static ⠿ while the block is still open
+ * but nothing is executing (the model is writing the next call) and settles to
+ * ✓ / ✗ / ○ only once the block is closed. Header time is the union of the
+ * tool execution intervals, i.e. pure tool time.
  *
  * Design notes:
  *
@@ -33,6 +47,15 @@
  *   `context.invalidate()` (it already calls `ui.requestRender()`), so the TUI
  *   instance never has to be captured through a widget.
  *
+ * - renderCall fires while the args are still streaming, before
+ *   tool_execution_start. While the agent is live (agent_start..agent_end) such
+ *   a row joins the open block right away, in the queued state, so it never
+ *   paints as a solo row that later collapses to 0 lines. pending/startedAt are
+ *   still owned by tool_execution_start.
+ *
+ * - Pure logic (formatting, selection, width-based layout) lives in format.ts
+ *   and is unit-tested with `node --test tests/*.test.ts`.
+ *
  * - Thinking is deliberately untouched: pi keeps rendering its own `Thinking...`
  *   row (click to expand). Nothing here depends on pi internals.
  *
@@ -52,26 +75,54 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type Theme,
+	renderDiff,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
-import { homedir } from "os";
+import {
+	captureText,
+	composeHeader,
+	composeToolLine,
+	countLines,
+	type DiffStat,
+	diffStat,
+	errorTail,
+	formatDuration,
+	headerState,
+	type Paint,
+	pickCollapsedTool,
+	previewModeOf,
+	selectPreview,
+	summaryOf,
+	toolState,
+	typeBreakdown,
+	unionDuration,
+} from "./format.ts";
 
 // =============================================================================
 // Tunables
 // =============================================================================
 /** Result lines shown per tool when the block is expanded (Ctrl+O). */
 const EXPANDED_RESULT_LINES = 5;
-/** Argument summary length. */
-const SUMMARY_MAX_CHARS = 60;
+/** Diff lines shown for an edit when the block is expanded. */
+const EXPANDED_DIFF_LINES = 20;
 /** Keep at most this much result text per tool in memory (for previews). */
 const RESULT_TEXT_LIMIT = 4000;
+/** Same bound for the edit diff kept for the expanded view. */
+const DIFF_TEXT_LIMIT = 8000;
 const SPINNER_MS = 100;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /** One leading space, matching tool rows rendered in pi's default shell (Box paddingX = 1). */
+/** A call that has neither started nor produced a result (args streaming, waiting, or never ran). */
+const QUEUED_ICON = "○";
+/** Open block with nothing executing: the model is generating the next call. Static on purpose — no timer runs for it. */
+const IDLE_ICON = "⠿";
+const EXPAND_HINT = "Ctrl+O to expand";
 const INDENT = " ";
+/** Lead of a preview row: the rail continues under every tool but the last. Same width for both. */
 const SUB_INDENT = "    ";
+const SUB_INDENT_RAIL = "│   ";
 const RAIL_MID = "├ ";
 const RAIL_END = "└ ";
 
@@ -98,20 +149,30 @@ type ToolEntry = {
 	/** Set by tool_execution_start. Undefined for replayed history and for rows whose execution never started. */
 	startedAt?: number;
 	endedAt?: number;
+	/** Bounded result text: its tail for bash, its head for everything else. */
 	resultText: string;
+	/** Line count of the full result text, before it was bounded. */
+	resultLineCount: number;
+	/** Last meaningful output line, shown on the tool line when the call failed. */
+	errorTail: string;
+	/** edit only: `details.diff`, cut to whole lines within DIFF_TEXT_LIMIT. */
+	diff?: string;
+	/** edit only: counted on the full diff before it was cut. */
+	diffStat?: DiffStat;
+	diffLineCount?: number;
 	isError: boolean;
+	/** Executing right now; set by tool_execution_start only, never by a renderer. */
 	pending: boolean;
+	/** A final result exists (tool_execution_end, or a non-partial renderResult — replayed rows included). */
+	hasResult: boolean;
 	/** Mirrors pi's Ctrl+O (app.tools.expand) state as seen by this row. */
 	expanded: boolean;
-	/** Assigned when the tool joins a live group; undefined ⇒ render as a standalone compact row. */
+	/** Assigned when the tool joins a live group; undefined ⇒ render as a standalone compact row (replayed history). */
 	group?: ToolGroup;
 	row?: Component;
 };
 
 type ToolGroup = {
-	seq: number;
-	startedAt: number;
-	endedAt?: number;
 	/** Ctrl+O state, driven by the leader row. */
 	expanded: boolean;
 	closed: boolean;
@@ -120,7 +181,12 @@ type ToolGroup = {
 
 const entries = new Map<string, ToolEntry>();
 let currentGroup: ToolGroup | null = null;
-let groupSeq = 0;
+/**
+ * True between agent_start and agent_end. While live, a row that shows up in
+ * renderCall (its args are still streaming) joins the open group right away, so
+ * it never paints as a solo row that vanishes once execution starts.
+ */
+let live = false;
 /** Latest theme seen by a renderer (pi has no theme-change event). */
 let currentTheme: Theme | undefined;
 /** `context.invalidate()` of some live row — repaint without capturing the TUI. */
@@ -131,13 +197,12 @@ function resetState(): void {
 	stopAnimation();
 	entries.clear();
 	currentGroup = null;
+	live = false;
 	repaint = undefined;
 }
 
 function openGroup(): ToolGroup {
 	const group: ToolGroup = {
-		seq: ++groupSeq,
-		startedAt: Date.now(),
 		expanded: false,
 		closed: false,
 		tools: [],
@@ -146,7 +211,7 @@ function openGroup(): ToolGroup {
 	return group;
 }
 
-/** A boundary (visible text, user message, foreign tool) ends the current group. */
+/** A boundary (visible text, user message, agent_end) ends the current group. */
 function closeGroup(): void {
 	if (currentGroup) {
 		currentGroup.closed = true;
@@ -154,15 +219,34 @@ function closeGroup(): void {
 	}
 }
 
+function hasRun(entry: ToolEntry): boolean {
+	return entry.startedAt !== undefined || entry.hasResult;
+}
+
 /**
- * Look up (or create) the entry for a tool call.
- *
- * `live` is true only for `tool_execution_start`, i.e. when we know the call is
- * executing right now in this process — that is what makes a group. Rows created
- * by the renderer before the start event, and rows replayed from a stored
- * session, stay ungrouped and render as a standalone line.
+ * A tool we do not own is about to paint its native row. Calls of ours that are
+ * still queued sit *after* that row in the transcript (start events fire in
+ * call order), so they move to a fresh group; the calls that already ran stay
+ * in the old one, which is closed. Visual order keeps matching the transcript.
  */
-function ensureEntry(toolCallId: string, name: string, args: any, live: boolean): ToolEntry {
+function splitGroupAtForeignTool(): void {
+	const group = currentGroup;
+	if (!group) return;
+	const queued = group.tools.filter((tool) => !hasRun(tool));
+	if (queued.length === group.tools.length) return; // nothing of ours precedes the foreign row
+	closeGroup();
+	if (queued.length === 0) return;
+	group.tools = group.tools.filter(hasRun);
+	const next = openGroup();
+	for (const tool of queued) {
+		tool.group = next;
+		next.tools.push(tool);
+	}
+	next.expanded = queued[0]!.expanded;
+}
+
+/** Look up (or create) the entry for a tool call. */
+function ensureEntry(toolCallId: string, name: string, args: any): ToolEntry {
 	let entry = entries.get(toolCallId);
 	if (!entry) {
 		entry = {
@@ -170,22 +254,30 @@ function ensureEntry(toolCallId: string, name: string, args: any, live: boolean)
 			name,
 			args,
 			resultText: "",
+			resultLineCount: 0,
+			errorTail: "",
 			isError: false,
 			pending: false,
+			hasResult: false,
 			expanded: false,
 		};
 		entries.set(toolCallId, entry);
 	}
 	if (args !== undefined) entry.args = args;
-	if (live && !entry.group) {
-		const group = currentGroup && !currentGroup.closed ? currentGroup : openGroup();
-		if (group.tools.length === 0) group.startedAt = Date.now();
-		group.tools.push(entry);
-		entry.group = group;
-		entry.startedAt = Date.now();
-		if (entry.expanded) group.expanded = true;
-	}
 	return entry;
+}
+
+/**
+ * Put a live call into the open group (creating one if needed). Called from
+ * renderCall while the agent is live and from tool_execution_start; rows
+ * replayed from a stored session never get here and stay standalone.
+ */
+function joinGroup(entry: ToolEntry): void {
+	if (entry.group) return;
+	const group = currentGroup ?? openGroup();
+	group.tools.push(entry);
+	entry.group = group;
+	if (entry.expanded) group.expanded = true;
 }
 
 function isLeader(entry: ToolEntry): boolean {
@@ -220,25 +312,6 @@ function stopAnimation(): void {
 // =============================================================================
 // Formatting helpers
 // =============================================================================
-function shortenPath(path: string): string {
-	const home = homedir();
-	return path.startsWith(home) ? `~${path.slice(home.length)}` : path;
-}
-
-function oneLine(value: unknown, max = SUMMARY_MAX_CHARS): string {
-	const text = String(value ?? "").replace(/\s+/g, " ").trim();
-	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
-function formatDuration(ms: number): string {
-	const totalSeconds = Math.max(0, ms) / 1000;
-	if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = Math.round(totalSeconds % 60);
-	if (minutes < 60) return `${minutes}m ${seconds}s`;
-	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
 function entryDuration(entry: ToolEntry): string | undefined {
 	if (entry.startedAt === undefined) return undefined;
 	const end = entry.endedAt ?? (entry.pending ? Date.now() : undefined);
@@ -246,40 +319,33 @@ function entryDuration(entry: ToolEntry): string | undefined {
 	return formatDuration(end - entry.startedAt);
 }
 
-function summaryOf(entry: ToolEntry): string {
-	const args: any = entry.args ?? {};
-	switch (entry.name) {
-		case "bash":
-			return oneLine(args.command ?? "…");
-		case "read":
-		case "write":
-		case "edit":
-			return oneLine(shortenPath(String(args.path ?? "…")));
-		case "find":
-		case "grep":
-			return oneLine(`${args.pattern ?? ""} in ${shortenPath(String(args.path ?? "."))}`);
-		case "ls":
-			return oneLine(shortenPath(String(args.path ?? ".")));
-		default: {
-			const preferred = args.path ?? args.query ?? args.name ?? args.description ?? args.url;
-			if (preferred !== undefined) return oneLine(preferred);
-			try {
-				return oneLine(JSON.stringify(args));
-			} catch {
-				return "…";
-			}
-		}
-	}
-}
-
-function resultTextOf(result: any): string {
+/** Keep a bounded copy of the result text (live output included) on the entry. */
+function captureResult(entry: ToolEntry, result: any): void {
 	const content = Array.isArray(result?.content) ? result.content : [];
-	const text = content
+	const full = content
 		.filter((item: any) => item?.type === "text")
 		.map((item: any) => String(item.text ?? ""))
 		.join("\n")
 		.trim();
-	return text.length > RESULT_TEXT_LIMIT ? text.slice(0, RESULT_TEXT_LIMIT) : text;
+	const captured = captureText(full, RESULT_TEXT_LIMIT, previewModeOf(entry.name));
+	entry.resultText = captured.text;
+	entry.resultLineCount = captured.totalLines;
+	entry.errorTail = errorTail(full.slice(-RESULT_TEXT_LIMIT));
+}
+
+/** Remember an edit's diff (bounded) plus the stats of the full diff. */
+function captureDetails(entry: ToolEntry, result: any): void {
+	const diff = result?.details?.diff;
+	if (entry.name !== "edit" || typeof diff !== "string" || diff.length === 0) return;
+	entry.diffStat = diffStat(diff);
+	entry.diffLineCount = diff.split("\n").length;
+	if (diff.length <= DIFF_TEXT_LIMIT) {
+		entry.diff = diff;
+	} else {
+		const cut = diff.slice(0, DIFF_TEXT_LIMIT);
+		const lastBreak = cut.lastIndexOf("\n");
+		entry.diff = lastBreak > 0 ? cut.slice(0, lastBreak) : cut;
+	}
 }
 
 function spinnerFrame(now: number): string {
@@ -287,9 +353,16 @@ function spinnerFrame(now: number): string {
 }
 
 function statusIcon(entry: ToolEntry, now: number): { icon: string; color: string } {
-	if (entry.pending) return { icon: spinnerFrame(now), color: "accent" };
-	if (entry.isError) return { icon: "✗", color: "error" };
-	return { icon: "✓", color: "success" };
+	switch (toolState(entry)) {
+		case "running":
+			return { icon: spinnerFrame(now), color: "accent" };
+		case "failed":
+			return { icon: "✗", color: "error" };
+		case "ok":
+			return { icon: "✓", color: "success" };
+		case "queued":
+			return { icon: QUEUED_ICON, color: "muted" };
+	}
 }
 
 // =============================================================================
@@ -303,88 +376,135 @@ function bold(text: string): string {
 	return currentTheme ? currentTheme.bold(text) : text;
 }
 
-function toolLine(rail: string, entry: ToolEntry, now: number): string {
+const paint: Paint = { fg, bold };
+
+/** `+N −M` for an edit, `N lines` for a write; empty for everything else. */
+function statOf(entry: ToolEntry): string {
+	if (entry.name === "edit" && entry.diffStat) {
+		return `${fg("toolDiffAdded", `+${entry.diffStat.added}`)} ${fg("toolDiffRemoved", `−${entry.diffStat.removed}`)}`;
+	}
+	if (entry.name === "write" && typeof entry.args?.content === "string") {
+		const lines = countLines(entry.args.content);
+		return fg("muted", `${lines} line${lines === 1 ? "" : "s"}`);
+	}
+	return "";
+}
+
+function toolLine(rail: string, entry: ToolEntry, now: number, contentWidth: number): string {
 	const { icon, color } = statusIcon(entry, now);
-	const duration = entryDuration(entry);
-	return (
-		fg("dim", rail) +
-		fg(color, icon) +
-		" " +
-		fg("toolTitle", bold(entry.name)) +
-		fg("dim", ":") +
-		" " +
-		fg("dim", summaryOf(entry)) +
-		(duration ? ` ${fg("muted", `(${duration})`)}` : "")
+	return composeToolLine(
+		{
+			rail,
+			icon,
+			iconColor: color,
+			name: entry.name,
+			summary: summaryOf(entry.name, entry.args),
+			stat: statOf(entry),
+			duration: entryDuration(entry),
+			errorTail: toolState(entry) === "failed" ? entry.errorTail : undefined,
+		},
+		contentWidth,
+		paint,
 	);
 }
 
-/** Result preview rows for an expanded block (live output included while running). */
-function resultPreviewLines(entry: ToolEntry, contentWidth: number): string[] {
-	if (!entry.resultText) return [];
-	const allLines = entry.resultText.split("\n");
-	const lines = allLines.slice(0, EXPANDED_RESULT_LINES);
-	const rows = lines.map((line) =>
-		fg("dim", SUB_INDENT) + truncateToWidth(fg("toolOutput", line), Math.max(1, contentWidth - SUB_INDENT.length), "…"),
+/** pi's own diff renderer (intra-line highlights); plain theme colors if it is unavailable. */
+function colorDiff(diffText: string): string[] {
+	try {
+		return renderDiff(diffText).split("\n");
+	} catch {
+		return diffText.split("\n").map((line) =>
+			fg(line.startsWith("+") ? "toolDiffAdded" : line.startsWith("-") ? "toolDiffRemoved" : "toolDiffContext", line),
+		);
+	}
+}
+
+/** An edit shows its diff instead of the "Successfully replaced…" text. */
+function diffPreviewLines(entry: ToolEntry, contentWidth: number, lead: string): string[] {
+	const shown = entry.diff!.split("\n").slice(0, EXPANDED_DIFF_LINES);
+	const total = Math.max(entry.diffLineCount ?? shown.length, shown.length);
+	const rows = colorDiff(shown.join("\n")).map(
+		(line) => fg("dim", lead) + truncateToWidth(line, Math.max(1, contentWidth - lead.length), "…"),
 	);
-	if (allLines.length > lines.length) {
-		rows.push(`${fg("dim", SUB_INDENT)}${fg("muted", `… ${allLines.length - lines.length} more lines`)}`);
+	if (total > shown.length) {
+		rows.push(`${fg("dim", lead)}${fg("muted", `… ${total - shown.length} more lines`)}`);
 	}
 	return rows;
 }
 
-/**
- * The single call shown while collapsed: the newest still-running call wins, and
- * once the whole batch is done the last call in it.
- */
-function pickCollapsedTool(tools: ToolEntry[]): ToolEntry {
-	for (let index = tools.length - 1; index >= 0; index--) {
-		const tool = tools[index]!;
-		if (tool.pending) return tool;
+/** Result preview rows for an expanded block (live output included while running). */
+function resultPreviewLines(entry: ToolEntry, contentWidth: number, lead: string = SUB_INDENT): string[] {
+	if (entry.diff && !entry.isError) return diffPreviewLines(entry, contentWidth, lead);
+	const preview = selectPreview(entry.resultText, EXPANDED_RESULT_LINES, previewModeOf(entry.name), entry.resultLineCount);
+	const note = (text: string) => `${fg("dim", lead)}${fg("muted", text)}`;
+	const rows: string[] = [];
+	// bash shows its last lines, so the omitted part comes first.
+	if (preview.hidden > 0 && preview.mode === "tail") rows.push(note(`… ${preview.hidden} earlier lines`));
+	for (const line of preview.lines) {
+		rows.push(fg("dim", lead) + truncateToWidth(fg("toolOutput", line), Math.max(1, contentWidth - lead.length), "…"));
 	}
-	return tools[tools.length - 1]!;
+	if (preview.hidden > 0 && preview.mode === "head") rows.push(note(`… ${preview.hidden} more lines`));
+	return rows;
 }
 
-function groupEndedAt(group: ToolGroup): number | undefined {
-	let end: number | undefined;
-	for (const tool of group.tools) {
-		if (tool.endedAt !== undefined && (end === undefined || tool.endedAt > end)) end = tool.endedAt;
+function headerIcon(state: ReturnType<typeof headerState>, now: number): string {
+	switch (state) {
+		case "running":
+			return spinnerFrame(now);
+		case "idle":
+			return IDLE_ICON;
+		case "ok":
+			return "✓";
+		case "failed":
+			return "✗";
+		case "incomplete":
+			return QUEUED_ICON;
 	}
-	return end;
 }
 
 function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const now = Date.now();
-	const pending = group.tools.some((tool) => tool.pending);
-	const failed = group.tools.some((tool) => tool.isError);
-	const icon = pending ? spinnerFrame(now) : failed ? "✗" : "✓";
-	const headColor = pending ? "accent" : failed ? "error" : "success";
-	const endedAt = pending ? now : (groupEndedAt(group) ?? now);
+	const state = headerState(group.tools, group.closed);
 	const contentWidth = Math.max(1, width - INDENT.length);
 
 	// A single tool needs no header: the tool line already carries state, summary
 	// and duration. Only batches show the “N tool calls · total” summary.
 	const lines: string[] = [];
 	if (group.tools.length > 1) {
+		// Pure tool time: the union of the execution intervals, so parallel calls do
+		// not double count and the model's thinking time between calls is left out.
+		const intervals = group.tools
+			.filter((tool) => tool.startedAt !== undefined)
+			.map((tool) => ({ start: tool.startedAt!, end: tool.endedAt }));
 		lines.push(
-			`${fg(headColor, icon)} ${fg(headColor, bold(`${group.tools.length} tool call${group.tools.length === 1 ? "" : "s"}`))} ${fg("muted", `· ${formatDuration(endedAt - group.startedAt)}`)}`,
+			composeHeader(
+				{
+					state,
+					icon: headerIcon(state, now),
+					count: group.tools.length,
+					failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
+					durationMs: unionDuration(intervals, now),
+					breakdown: typeBreakdown(group.tools.map((tool) => tool.name)) || undefined,
+					hint: group.expanded ? undefined : EXPAND_HINT,
+				},
+				contentWidth,
+				paint,
+			),
 		);
 	}
 
-	// Collapsed shows exactly one call — the one still running if there is one,
-	// otherwise the most recent. The header carries the total count.
+	// Collapsed = header + one activity line: the call still running if there is
+	// one, else the most recent failure, else the last call. The header carries
+	// the total count and the expand hint. A single-tool block is just its line.
 	const visible = group.expanded ? group.tools : [pickCollapsedTool(group.tools)];
-	const hiddenCount = group.tools.length - visible.length;
 	visible.forEach((tool, index) => {
-		const isLastRow = index === visible.length - 1 && hiddenCount === 0;
-		const rail = visible.length === 1 ? "" : isLastRow ? RAIL_END : RAIL_MID;
-		lines.push(toolLine(rail, tool, now));
-		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth));
+		const isLast = index === visible.length - 1;
+		const rail = group.tools.length === 1 ? "" : isLast ? RAIL_END : RAIL_MID;
+		lines.push(toolLine(rail, tool, now, contentWidth));
+		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth, isLast ? SUB_INDENT : SUB_INDENT_RAIL));
 	});
-	if (hiddenCount > 0) {
-		lines.push(`${fg("dim", "… ")}${fg("muted", `${hiddenCount} more call${hiddenCount === 1 ? "" : "s"}`)} ${fg("dim", "(Ctrl+O to expand)")}`);
-	}
 
-	if (pending) ensureAnimation();
+	if (state === "running") ensureAnimation();
 	return lines.map((line) => INDENT + truncateToWidth(line, contentWidth, "…"));
 }
 
@@ -392,7 +512,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 function renderSoloRow(entry: ToolEntry, width: number): string[] {
 	const now = Date.now();
 	const contentWidth = Math.max(1, width - INDENT.length);
-	const lines = [toolLine("", entry, now)];
+	const lines = [toolLine("", entry, now, contentWidth)];
 	if (entry.expanded) lines.push(...resultPreviewLines(entry, contentWidth));
 	if (entry.pending) ensureAnimation();
 	return lines.map((line) => INDENT + truncateToWidth(line, contentWidth, "…"));
@@ -453,8 +573,11 @@ export default function (pi: ExtensionAPI) {
 			renderCall: (args: any, renderTheme: Theme, context: RenderContext) => {
 				currentTheme = renderTheme;
 				repaint = context.invalidate;
-				const entry = ensureEntry(context.toolCallId, name, args, false);
+				const entry = ensureEntry(context.toolCallId, name, args);
 				entry.expanded = context.expanded;
+				// Join while the args are still streaming; pending/startedAt stay
+				// untouched until tool_execution_start says the call really runs.
+				if (live && !entry.hasResult) joinGroup(entry);
 				if (isLeader(entry)) entry.group!.expanded = context.expanded;
 				entry.row ??= new RowComponent(entry);
 				return entry.row;
@@ -464,13 +587,17 @@ export default function (pi: ExtensionAPI) {
 				repaint = context.invalidate;
 				const entry = entries.get(context.toolCallId);
 				if (entry) {
-					entry.resultText = resultTextOf(result);
+					captureResult(entry, result);
+					captureDetails(entry, result);
 					// NOTE: the object passed to renderResult only carries content/details —
 					// `result.isError` is undefined here and would clobber the flag set by
 					// tool_execution_end. context.isError mirrors the row's real state and
 					// is also correct for replayed history.
 					entry.isError = context.isError;
-					if (!options?.isPartial) entry.pending = false;
+					if (!options?.isPartial) {
+						entry.pending = false;
+						entry.hasResult = true;
+					}
 					entry.expanded = context.expanded;
 					if (isLeader(entry)) entry.group!.expanded = context.expanded;
 				}
@@ -508,15 +635,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", (event) => {
+		live = true;
 		if (!BUILTIN_TOOL_NAMES.has(event.toolName)) {
-			// A tool we do not own renders its own native row; end the block so the
-			// visual order keeps matching the transcript order.
-			closeGroup();
+			splitGroupAtForeignTool();
 			return;
 		}
-		const entry = ensureEntry(event.toolCallId, event.toolName, event.args, true);
+		const entry = ensureEntry(event.toolCallId, event.toolName, event.args);
+		joinGroup(entry);
 		entry.pending = true;
-		entry.startedAt ??= Date.now();
+		entry.startedAt = Date.now();
 		ensureAnimation();
 	});
 
@@ -524,21 +651,29 @@ export default function (pi: ExtensionAPI) {
 		const entry = entries.get(event.toolCallId);
 		if (!entry) return;
 		// Streaming output: keep it visible when the block is expanded.
-		entry.resultText = resultTextOf(event.partialResult);
+		captureResult(entry, event.partialResult);
 	});
 
 	pi.on("tool_execution_end", (event) => {
 		const entry = entries.get(event.toolCallId);
 		if (!entry) return;
 		entry.pending = false;
+		entry.hasResult = true;
 		entry.endedAt = Date.now();
 		entry.isError = Boolean(event.isError);
-		entry.resultText = resultTextOf(event.result);
+		captureResult(entry, event.result);
+		captureDetails(entry, event.result);
 		if (!hasPendingTool()) stopAnimation();
 		repaint?.();
 	});
 
+	pi.on("agent_start", () => {
+		live = true;
+	});
+
 	pi.on("agent_end", () => {
+		// Calls that never started keep the queued icon: they did not succeed.
+		live = false;
 		closeGroup();
 		for (const entry of entries.values()) {
 			if (!entry.pending) continue;
