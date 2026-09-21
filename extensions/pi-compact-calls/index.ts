@@ -73,6 +73,7 @@ import {
 	selectPreview,
 	summaryOf,
 	toolState,
+	typeBreakdown,
 	unionDuration,
 } from "./format.ts";
 
@@ -460,6 +461,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 					count: group.tools.length,
 					failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
 					durationMs: unionDuration(intervals, now),
+					breakdown: typeBreakdown(group.tools.map((tool) => tool.name)) || undefined,
 					hint: group.expanded ? undefined : EXPAND_HINT,
 				},
 				contentWidth,

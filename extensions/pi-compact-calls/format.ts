@@ -257,12 +257,28 @@ const HEADER_COLORS: Record<HeaderState, string> = {
 	incomplete: "muted",
 };
 
+/**
+ * "4 read, 2 grep, 1 bash" — most frequent first, ties in order of appearance.
+ * Empty when every call uses the same tool: the activity line already names it.
+ */
+export function typeBreakdown(names: readonly string[]): string {
+	const counts = new Map<string, number>();
+	for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
+	if (counts.size < 2) return "";
+	return [...counts.entries()]
+		.sort((a, b) => b[1] - a[1]) // stable: equal counts keep insertion order
+		.map(([name, count]) => `${count} ${name}`)
+		.join(", ");
+}
+
 export type HeaderParts = {
 	state: HeaderState;
 	icon: string;
 	count: number;
 	failed: number;
 	durationMs: number;
+	/** e.g. "4 read, 2 grep, 1 bash"; shown in parentheses after the count. */
+	breakdown?: string;
 	/** Dim trailing hint, e.g. "Ctrl+O to expand" (collapsed blocks only). */
 	hint?: string;
 };
@@ -270,7 +286,7 @@ export type HeaderParts = {
 /**
  * Compose the block header for `width` columns. When it does not fit, optional
  * parts are dropped lowest priority first; the priority (high → low) is
- * count > failed > duration > hint.
+ * count > failed > duration > breakdown > hint.
  */
 export function composeHeader(parts: HeaderParts, width: number, paint: Paint = PLAIN_PAINT): string {
 	const color = HEADER_COLORS[parts.state];
@@ -278,8 +294,9 @@ export function composeHeader(parts: HeaderParts, width: number, paint: Paint = 
 	const head = `${paint.fg(color, parts.icon)} ${paint.fg(color, paint.bold(`${parts.count} tool calls`))}`;
 	// Display order; `drop` is the order in which parts are given up (0 first).
 	const optional: { text: string; drop: number }[] = [];
-	if (parts.failed > 0) optional.push({ text: sep + paint.fg("error", `${parts.failed} failed`), drop: 2 });
-	optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 1 });
+	if (parts.breakdown) optional.push({ text: ` ${paint.fg("dim", `(${parts.breakdown})`)}`, drop: 1 });
+	if (parts.failed > 0) optional.push({ text: sep + paint.fg("error", `${parts.failed} failed`), drop: 3 });
+	optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 2 });
 	if (parts.hint) optional.push({ text: sep + paint.fg("dim", parts.hint), drop: 0 });
 
 	let kept = optional;
