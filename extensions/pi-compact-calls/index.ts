@@ -56,8 +56,14 @@
  * - Pure logic (formatting, selection, width-based layout) lives in format.ts
  *   and is unit-tested with `node --test tests/*.test.ts`.
  *
- * - Thinking is deliberately untouched: pi keeps rendering its own `Thinking...`
- *   row (click to expand). Nothing here depends on pi internals.
+ * - Thinking folds into the block: pi renders one *hidden* `Thinking...` row per
+ *   assistant message, so a turn that thinks between calls stacks identical rows
+ *   beside the folded block. The only hook pi offers is the assistant message
+ *   component, so `updateContent` is wrapped (see installThinkingFold) to hand the
+ *   native renderer a copy of the message with the absorbed runs removed; their
+ *   text is kept on the tool entry and shown above that step's row when the block
+ *   is expanded. Replayed history, non-built-in tools and messages with visible
+ *   prose keep the native row. This is the only patch in the extension.
  *
  * - Replayed history (resume, tree navigation, /reload) produces no
  *   tool_execution_* events, so those rows cannot be grouped; they render as a
@@ -88,6 +94,7 @@ import {
 	type DiffStat,
 	diffStat,
 	errorTail,
+	foldThinking,
 	formatDuration,
 	headerState,
 	type Paint,
@@ -100,6 +107,10 @@ import {
 	typeBreakdown,
 	unionDuration,
 } from "./format.ts";
+// Namespace import on purpose: pi's root bundle re-exports the interactive
+// components, but if a future version drops this one the extension must still
+// load — see installThinkingFold().
+import * as piAgent from "@earendil-works/pi-coding-agent";
 
 // =============================================================================
 // Tunables
@@ -110,6 +121,8 @@ const EXPANDED_RESULT_LINES = 5;
 const EXPANDED_DIFF_LINES = 20;
 /** Keep at most this much result text per tool in memory (for previews). */
 const RESULT_TEXT_LIMIT = 4000;
+/** Same bound for the thinking absorbed from a step. */
+const THINKING_TEXT_LIMIT = 8000;
 /** Same bound for the edit diff kept for the expanded view. */
 const DIFF_TEXT_LIMIT = 8000;
 const SPINNER_MS = 100;
@@ -161,6 +174,9 @@ type ToolEntry = {
 	/** edit only: counted on the full diff before it was cut. */
 	diffStat?: DiffStat;
 	diffLineCount?: number;
+	/** Thinking of the step that made this call, absorbed out of its message (expanded view only). */
+	thinking?: string;
+	thinkingLineCount?: number;
 	isError: boolean;
 	/** Executing right now; set by tool_execution_start only, never by a renderer. */
 	pending: boolean;
@@ -341,6 +357,13 @@ function captureResult(entry: ToolEntry, result: any): void {
 	entry.errorTail = errorTail(full.slice(-RESULT_TEXT_LIMIT));
 }
 
+/** Keep the thinking absorbed out of a step's message (expanded view only). */
+function absorbThinking(entry: ToolEntry, text: string): void {
+	const captured = captureText(text, THINKING_TEXT_LIMIT, "head");
+	entry.thinking = captured.text;
+	entry.thinkingLineCount = captured.totalLines;
+}
+
 /** Remember an edit's diff (bounded) plus the stats of the full diff. */
 function captureDetails(entry: ToolEntry, result: any): void {
 	const diff = result?.details?.diff;
@@ -382,6 +405,10 @@ function fg(color: string, text: string): string {
 
 function bold(text: string): string {
 	return currentTheme ? currentTheme.bold(text) : text;
+}
+
+function italic(text: string): string {
+	return currentTheme ? currentTheme.italic(text) : text;
 }
 
 const paint: Paint = { fg, bold };
@@ -455,6 +482,23 @@ function resultPreviewLines(entry: ToolEntry, contentWidth: number, lead: string
 	return rows;
 }
 
+/**
+ * Thinking that was absorbed out of a step's message, above that step's tool row.
+ * Styled like pi's own thinking text (italic, thinkingText) so it is not
+ * mistaken for tool output.
+ */
+function thinkingLines(entry: ToolEntry, contentWidth: number, lead: string): string[] {
+	if (!entry.thinking) return [];
+	const preview = selectPreview(entry.thinking, EXPANDED_RESULT_LINES, "head", entry.thinkingLineCount ?? 0);
+	const rows = preview.lines.map(
+		(line) =>
+			fg("dim", lead) +
+			truncateToWidth(italic(fg("thinkingText", line)), Math.max(1, contentWidth - lead.length), "…"),
+	);
+	if (preview.hidden > 0) rows.push(`${fg("dim", lead)}${fg("muted", `… ${preview.hidden} more lines`)}`);
+	return rows;
+}
+
 function headerIcon(state: ReturnType<typeof headerState>, now: number): string {
 	switch (state) {
 		case "running":
@@ -508,8 +552,11 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	visible.forEach((tool, index) => {
 		const isLast = index === visible.length - 1;
 		const rail = group.tools.length === 1 ? "" : isLast ? RAIL_END : RAIL_MID;
+		const lead = isLast ? SUB_INDENT : SUB_INDENT_RAIL;
+		// Absorbed thinking comes first: it is what produced this call.
+		if (group.expanded) lines.push(...thinkingLines(tool, contentWidth, lead));
 		lines.push(toolLine(rail, tool, now, contentWidth));
-		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth, isLast ? SUB_INDENT : SUB_INDENT_RAIL));
+		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth, lead));
 	});
 
 	if (state === "running") ensureAnimation();
@@ -540,6 +587,66 @@ class RowComponent implements Component {
 }
 
 // =============================================================================
+// Thinking folded into the block
+// =============================================================================
+/**
+ * pi renders one *hidden* `Thinking...` row per assistant message (per thinking
+ * run, actually). A multi-step turn is one message per step, so a turn that
+ * thinks between calls stacks identical rows beside the folded block — and once
+ * the row renders empty, the component's own `Spacer(1)` is left behind as a
+ * stray blank line.
+ *
+ * pi exposes no per-message hook for this (`registerMessageRenderer` only covers
+ * custom messages, and the markdown transformer only runs while thinking is
+ * visible), so the one entry point is the assistant message component's
+ * `updateContent`. We wrap it, hand the native implementation a copy of the
+ * message with the absorbed runs removed, and keep their text on the tool entry
+ * that absorbed it, where the expanded block renders it.
+ *
+ * The wrapper is deliberately narrow:
+ *
+ * - `foldThinking` only absorbs a run that is followed by a tool call of ours
+ *   that actually joined a block, so replayed history (no blocks), non-built-in
+ *   tools and messages with visible prose keep their native rows;
+ * - a throw inside the fold falls back to the untouched message;
+ * - a missing export (future pi) leaves the extension fully working, just with
+ *   native thinking rows.
+ */
+function installThinkingFold(): void {
+	const component = (piAgent as unknown as { AssistantMessageComponent?: { prototype: any } }).AssistantMessageComponent;
+	const proto = component?.prototype;
+	if (!proto || typeof proto.updateContent !== "function" || proto.piCompactCallsThinkingFold) return;
+	const native = proto.updateContent as (message: any, isStreaming?: boolean) => void;
+	proto.updateContent = function (this: unknown, message: any, isStreaming?: boolean) {
+		let rendered = message;
+		try {
+			rendered = foldThinkingOfMessage(message) ?? message;
+		} catch {
+			rendered = message;
+		}
+		return native.call(this, rendered, isStreaming);
+	};
+	proto.piCompactCallsThinkingFold = true;
+}
+
+/** Move the thinking of a message into the blocks its tool calls joined. */
+function foldThinkingOfMessage(message: any): any | undefined {
+	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return undefined;
+	const folded = foldThinking(message.content, (toolCallId) => entries.get(toolCallId)?.group !== undefined);
+	if (!folded) return undefined;
+	// Rows are created right after the message update that first carries the call,
+	// so on that first frame `entries` may not know the id yet; the next update
+	// (further streaming, or message_end) absorbs it. Attributions are never
+	// cleared, and the filtered copy has no thinking left, so re-rendering it is
+	// a no-op that keeps the stored text.
+	for (const { toolCallId, text } of folded.attributions) {
+		const entry = entries.get(toolCallId);
+		if (entry) absorbThinking(entry, text);
+	}
+	return { ...message, content: folded.content };
+}
+
+// =============================================================================
 // Tool registration
 // =============================================================================
 type NativeTool = ToolDefinition<any, any, any>;
@@ -564,6 +671,7 @@ function nativeTools(cwd: string): Record<BuiltinToolName, NativeTool> {
 }
 
 export default function (pi: ExtensionAPI) {
+	installThinkingFold();
 	for (const name of BUILTIN_TOOLS) {
 		const native = nativeTools(process.cwd())[name];
 		pi.registerTool({
