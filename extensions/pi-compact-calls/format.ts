@@ -237,12 +237,14 @@ export type HeaderParts = {
 	count: number;
 	failed: number;
 	durationMs: number;
+	/** Dim trailing hint, e.g. "Ctrl+O to expand" (collapsed blocks only). */
+	hint?: string;
 };
 
 /**
  * Compose the block header for `width` columns. When it does not fit, optional
  * parts are dropped lowest priority first; the priority (high → low) is
- * count > failed > duration.
+ * count > failed > duration > hint.
  */
 export function composeHeader(parts: HeaderParts, width: number, paint: Paint = PLAIN_PAINT): string {
 	const color = HEADER_COLORS[parts.state];
@@ -250,8 +252,9 @@ export function composeHeader(parts: HeaderParts, width: number, paint: Paint = 
 	const head = `${paint.fg(color, parts.icon)} ${paint.fg(color, paint.bold(`${parts.count} tool calls`))}`;
 	// Display order; `drop` is the order in which parts are given up (0 first).
 	const optional: { text: string; drop: number }[] = [];
-	if (parts.failed > 0) optional.push({ text: sep + paint.fg("error", `${parts.failed} failed`), drop: 1 });
-	optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 0 });
+	if (parts.failed > 0) optional.push({ text: sep + paint.fg("error", `${parts.failed} failed`), drop: 2 });
+	optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 1 });
+	if (parts.hint) optional.push({ text: sep + paint.fg("dim", parts.hint), drop: 0 });
 
 	let kept = optional;
 	for (;;) {

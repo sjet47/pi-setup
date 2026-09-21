@@ -93,6 +93,7 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 const QUEUED_ICON = "○";
 /** Open block with nothing executing: the model is generating the next call. Static on purpose — no timer runs for it. */
 const IDLE_ICON = "⠿";
+const EXPAND_HINT = "Ctrl+O to expand";
 const INDENT = " ";
 const SUB_INDENT = "    ";
 const RAIL_MID = "├ ";
@@ -456,6 +457,7 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 					count: group.tools.length,
 					failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
 					durationMs: unionDuration(intervals, now),
+					hint: group.expanded ? undefined : EXPAND_HINT,
 				},
 				contentWidth,
 				paint,
@@ -463,19 +465,15 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 		);
 	}
 
-	// Collapsed shows exactly one call — the one still running if there is one,
-	// otherwise the most recent. The header carries the total count.
+	// Collapsed = header + one activity line: the call still running if there is
+	// one, else the most recent failure, else the last call. The header carries
+	// the total count and the expand hint. A single-tool block is just its line.
 	const visible = group.expanded ? group.tools : [pickCollapsedTool(group.tools)];
-	const hiddenCount = group.tools.length - visible.length;
 	visible.forEach((tool, index) => {
-		const isLastRow = index === visible.length - 1 && hiddenCount === 0;
-		const rail = visible.length === 1 ? "" : isLastRow ? RAIL_END : RAIL_MID;
+		const rail = group.tools.length === 1 ? "" : index === visible.length - 1 ? RAIL_END : RAIL_MID;
 		lines.push(toolLine(rail, tool, now));
 		if (group.expanded) lines.push(...resultPreviewLines(tool, contentWidth));
 	});
-	if (hiddenCount > 0) {
-		lines.push(`${fg("dim", "… ")}${fg("muted", `${hiddenCount} more call${hiddenCount === 1 ? "" : "s"}`)} ${fg("dim", "(Ctrl+O to expand)")}`);
-	}
 
 	if (state === "running") ensureAnimation();
 	return lines.map((line) => INDENT + truncateToWidth(line, contentWidth, "…"));
