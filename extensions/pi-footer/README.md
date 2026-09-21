@@ -3,16 +3,18 @@
 输入框上边框的**唯一 owner**：session name 与实时 TPS 统计行都画在这一行上，与 pi 原生的 working / compaction / retry / branchSummary spinner 共用同一行。
 
 ```
-工作中  ── ⠼ Working ──────── ⚡42t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s 🧠12 ⏳2.1s── feat/auth ─
-输入框  │ 在这里打字…                                                             │
-        ──────────────────────────────────────────────────────────────────────────
-空闲    ────────────────────── ⚡38t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s 🧠12 ⏳2.1s── feat/auth ─
-无内容  ──────────────────────────────────────────────────────────────────────────
+工作中  ── ⠼ Working ⚡42t/s 🔧3 ⏱1.2s 🧠12 ⏳2.1s──────────────── feat/auth ─
+输入框  │ 在这里打字…                                                     │
+        ──────────────────────────────────────────────────────────────────
+空闲    ──⚡42t/s 🔧3 ⏱1.2s 🧠12 ⏳2.1s─────────────────────────── feat/auth ─
+无内容  ──────────────────────────────────────────────────────────────────
 ```
 
-- 右侧最外是 session name（`/name` 设置的，Claude Code 风格），外侧留一个空格再接收尾的 `─`；没有 name 时右边只剩 stats。
-- stats 与 name 之间的间隔也是 border line（两列 `─`），整条上边框从 status 到右端是一条连续的线；只有 name 自身两侧留空格做呼吸。
-- stats 行（从 [pi-tps](https://github.com/summertime-wu/pi-tps) 收编）排在 name 左边，**多行瀑布时间轴已移除** —— 单行边框放不下。
+- 左边是 pi 的内联 status（`── ⠼ Working `）+ **stats 行**（从 [pi-tps](https://github.com/summertime-wu/pi-tps) 收编）；右边是 session name（`/name` 设置的，Claude Code 风格），中间全是 dash 补白，整条上边框是一条连续的线。
+- 没有 status 时（空闲/等待），stats 前面自己带 `──` 两列前导 dash，这样空闲态和工作中左端起点一致，stats 也不会贴到边框端点。没有 stats 时（run 还没产出数据）则整行是原生 dash。
+- name 自身两侧各留一个空格做呼吸，外侧再接收尾的一列 `─`。
+- **多行瀑布时间轴已移除** —— 单行边框放不下。
+- **不显示 `↑`/`↓` token 计数**：pi 自己的 footer 就在下面一行报同样的数字（还带 cache 命中率），重复没意义。tracker 仍在计算这两个 run 累计（单测守住语义），要重新画只需在 `statsSegments` 里加回一个段。
 - 空闲（`agent_end` 之后）：保留上一轮的数值，整行转 muted；`agent_start` 时清空，不会拿上一轮的数字冒充本轮。
 - run 还没产出任何数据、且没有 session name 时，整行就是原生 dash，和没装本扩展一样。
 - 编辑器内容滚动（输入超过屏高 30%）时交回 pi 原生渲染，此时上边框是 `↑ n more`，name 与 stats 都不显示（这是有意的：滚动指示比 name 重要）。
@@ -41,8 +43,7 @@
 | 2 | `🧠12` | thinking tokens |
 | 3 | `🔧3` | 本 run 工具调用数 |
 | 4 | `⏱1.2s` | TTFT（受 `showTtft` 开关） |
-| 5 | `↑12.3k ↓4.5k` | token 累计 |
-| 6 | `⚡42t/s` | 核心，整个 stats 段消失 |
+| 5 | `⚡42t/s` | 核心，整个 stats 段消失 |
 
 保底优先级：**session name → working spinner → stats**。给的宽度放不下完整 `Working` 文案时，status 先退化成只有 spinner（与 pi 原生行为一致）；stats 会在 status 之前被削掉。
 
@@ -51,8 +52,6 @@
 | 段 | 定义 |
 |----|------|
 | `⚡Nt/s` | 当前消息**纯生成窗口**（首字之后）的 token 估算 / 时长，再做 EMA（0.15 权重、80ms 节流）平滑。首个样本会明显偏高：窗口被夹在下限 100ms（与上游等效下限一致），随后收敛 |
-| `↑` | 本 agent run 内各次请求 `usage.input` 之和（**不含** cacheRead） |
-| `↓` | 各次请求 `usage.output` 之和 |
 | `🔧` | 本 run 的工具调用次数 |
 | `⏱` | TTFT = 首个内容（正文或 thinking）到达 − `before_provider_request` 时刻 |
 | `🧠` | 当前消息 thinking 字符数 / 4 |
@@ -80,13 +79,28 @@ npm run typecheck              # 仓库级 tsc（本扩展 0 报错）
 
 纯逻辑都在 `tps.ts`（不 import pi 运行时）：`TpsTracker` 的时序全部以 `now` 入参注入，`composeTopBorder` 是纯排版函数。
 
-## 验证记录（2026-09-21，pi 0.86.1）
+## 验证记录（2026-09-21 第二轮：stats 左置 + 去掉 ↑↓）
+
+> 布局在这轮定型：stats 从右侧挪到左侧（紧跟 status，空闲时自带 `──` 前导），并不再显示 `↑↓`。下面是本轮改动的验证；第一轮（右置 + `↑↓`）的记录保留在下一节，其中**统计口径、事件接线、降级顺序的结论仍然有效**，只有行文里的示例字符串是旧版式。
+
+单测 26 项全过（新增「核心替代 ↑↓ token 段」与「空闲 stats 带 `──` 前导」两条）；纯函数排版在 30 / 45 / 60 / 80 / 100 / 130 / 150 列逐档渲染，宽度全部严格等于终端宽度，降级顺序为 `⏳ → 🧠 → 🔧 → ⏱ → 整段消失`，`Working` 文案与 session name 在逐档收窄中始终保住：
+
+```
+150 ── ⠼ Working ⚡42t/s 🔧3 ⏱1.2s 🧠12 ⏳2.1s──────────────────────── feat/auth ─
+ 60 ── ⠼ Working ⚡42t/s 🔧3 ⏱1.2s 🧠12 ⏳2.1s────── feat/auth ─
+ 45 ── ⠼ Working ⚡42t/s 🔧3 ⏱1.2s─── feat/auth ─
+空闲 ──⚡42t/s 🔧3 ⏱1.2s 🧠12 ⏳2.1s────────────────────────── feat/auth ─
+```
+
+界面本身由用户在真实会话里自行确认（本轮不再做 tmux 抓屏）。
+
+## 验证记录（2026-09-21 第一轮：stats 右置 + ↑↓，pi 0.86.1）
 
 单测 25 项全过：TpsTracker 时序（TTFT / think tokens / run 累计 / 冻结 / 换消息清零 / 忽略 turn 外的请求时刻 / 100ms 窗口下限 / `message_end` 的最终样本不被节流吞掉 / 上报值与估算值的一致性 / 估算不进入累计）、降级顺序（逐步丢段到只剩核心、核心也放不下或只剩占位符则整段消失）、边框宽度在 1..150 列 × 有无 name × 有无 status × 有无 stats 全部守恒。
 
 实现完成后跑过一轮独立 review（对照上游源码逐条核），修掉了 6 个问题：最终 TPS 样本被 80ms 节流吞掉、展示与 tps 用了不同的 token 来源、窗口下限写成 50ms（上游等效是 100ms）、空 thinking 块导致 TTFT 偏小、估算值混进 run 累计、降级后只剩 `⚡…` 占位符。
 
-tmux 实机（`pi -ne -e extensions/pi-footer/index.ts -n feat/auth`，150 / 60 / 42 / 30 列）：
+tmux 实机（`pi -ne -e extensions/pi-footer/index.ts -n feat/auth`，150 / 60 / 42 / 30 列；**行文中的示例是当时右置 + `↑↓` 的版式**）：
 
 - 150 列工作中 `── ⠼ Working ── ⚡177t/s ↑7.2k ↓132 🔧1 🧠24 ⏳1.1s  feat/auth ─`；空闲同内容转 muted（ANSI 全是 `38;2;128;128;128`）；name 是主题 accent、边框是 thinking 边框色 ✓
 - 60 列 `── ⠏ Working ────⚡20t/s ↓13 ⏱0.7s 🧠13 ⏳0.8s  feat/auth ─`（status 保住）；stats 变宽时优先丢 `⏳`，不动 name 与 spinner ✓
@@ -94,7 +108,7 @@ tmux 实机（`pi -ne -e extensions/pi-footer/index.ts -n feat/auth`，150 / 60 
 - 无 session name：`── ⠋ Working ───⚡73t/s ↓73 ⏱0.8s 🧠11 ⏳1.6s─` ✓
 - 多行输入触发滚动 → 上边框变 `↑ 2 more`（原生接管）✓
 - 每帧用 `visibleWidth` 校验等于面板宽度：150 列与 60 列各 14 帧全部 OK ✓
-- stats 与 name 之间的间隔改成 border line（用户 2026-09-21 提的：原来那里是空白，看起来像边框断了一截）；纯函数渲染在 40/60/80/110/150 列校验宽度仍严格守恒 ✓
+- 布局按用户 2026-09-21 的两轮反馈定型：stats 从右侧挪到左侧（紧跟 status，空闲时带 2 列前导 dash），并去掉 `↑↓`；纯函数渲染在 30/45/60/80/100/130/150 列校验宽度仍严格守恒 ✓
 - 配色：theme 模式实测 `core=text / ↓=success / ⏱=warning / 🧠=thinkingText / ⏳=dim`；`morandi` 预设实测 `252/108/180/103/244`；空闲统一 muted ✓
 - `/pi-footer`：三个选项可切换并写入配置（实测关掉 `showStats` 后边框只剩 name），预设子菜单 4 色 swatch 正常 ✓
 - `/reload`：分别给 `index.ts`（`showTtft` 默认值）和 `tps.ts`（`🔧`→`⚙` 标记）打标记后 `/reload`，两者都生效，编辑器重新注册后边框继续工作 ✓

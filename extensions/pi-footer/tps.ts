@@ -315,7 +315,7 @@ export function presetIdleColor(name: string): StatsColor {
 
 // ── stats line ───────────────────────────────────────────────────────────
 
-type StatsKey = "core" | "tokens" | "tools" | "ttft" | "think" | "duration";
+type StatsKey = "core" | "tools" | "ttft" | "think" | "duration";
 
 interface StatsSegment {
 	key: StatsKey;
@@ -325,9 +325,9 @@ interface StatsSegment {
 /**
  * Drop order when the line does not fit — least useful first, so the core
  * `⚡Nt/s` is the very last thing to go. Detail (tools / thinking / duration)
- * goes before TTFT, TTFT before the token counts.
+ * goes before TTFT.
  */
-const DROP_ORDER: StatsKey[] = ["duration", "think", "tools", "ttft", "tokens", "core"];
+const DROP_ORDER: StatsKey[] = ["duration", "think", "tools", "ttft", "core"];
 
 export interface StatsLineOptions {
 	showTtft: boolean;
@@ -363,18 +363,15 @@ export function buildStatsLine(s: TpsSnapshot, o: StatsLineOptions): string {
 }
 
 function statsSegments(s: TpsSnapshot, showTtft: boolean): StatsSegment[] {
-	const tokens: StatsSegment["parts"] = [];
-	if (s.inputKnown) tokens.push({ role: "input", text: `↑${formatNum(s.inputTokens)}` });
-	if (s.outputTokens > 0) tokens.push({ role: "output", text: `↓${formatNum(s.outputTokens)}` });
-
-	// Everything hangs off the core segment: until there is a token count, a TPS
-	// estimate or a tool call, a bare "⏳1.9s" would just be noise on the border.
-	if (tokens.length === 0 && s.tps === null && s.toolCount === 0) return [];
+	// Everything hangs off the core segment: until there is a TPS estimate or a
+	// tool call, a bare "⏳1.9s" would just be noise on the border. The ↑/↓ token
+	// counts are deliberately not shown here — pi's own footer already reports
+	// them one line below.
+	if (s.tps === null && s.toolCount === 0) return [];
 
 	const segments: StatsSegment[] = [
 		{ key: "core", parts: [{ role: "core", text: s.tps !== null ? `⚡${s.tps}t/s` : CORE_PLACEHOLDER }] },
 	];
-	if (tokens.length > 0) segments.push({ key: "tokens", parts: tokens });
 	if (s.toolCount > 0) segments.push({ key: "tools", parts: [{ role: "tools", text: `🔧${s.toolCount}` }] });
 	if (showTtft && s.ttftMs !== null) {
 		segments.push({ key: "ttft", parts: [{ role: "ttft", text: `⏱${formatDuration(s.ttftMs)}` }] });
@@ -423,18 +420,24 @@ export interface TopBorderInput {
 }
 
 const TAIL_WIDTH = 1; // the single "─" closing the right block
-const SEP_WIDTH = 2; // gap between the stats line and the session name
-const FILL_MIN = 1; // at least one dash between the status block and the right block
+const LEAD_WIDTH = 2; // "──" drawn in front of the stats when no status is shown
+const FILL_MIN = 1; // at least one dash between the left block and the name
 const STATUS_BLOCK_MIN = 5; // "── " + one indicator column + " "
 
 /**
  * Compose the top border:
  *
- *   ── <working status> ───── <stats>  <session name> ─
+ *   ── <working status> <stats> ────────── <session name> ─
  *
- * Width is conserved exactly. Allocation priority: session name (fixed) →
- * working status (its natural width, capped at a third of the row) → stats
- * (elastic, degrades segment by segment down to nothing).
+ * Width is conserved exactly. The left side carries the status and the stats
+ * line, the right side keeps the session name, and the dashes fill whatever is
+ * left between them. Allocation priority: session name (fixed) → working
+ * status (its natural width, capped at a third of the row) → stats (elastic,
+ * degrades segment by segment down to nothing).
+ *
+ * The stats sit right after the status. With no status to follow they get
+ * their own `──` lead, so the line never starts with a bare stat and idling
+ * borders keep the same left margin as working ones.
  */
 export function composeTopBorder(input: TopBorderInput): string {
 	// The session name is the last thing to go, but on a border narrower than the
@@ -446,55 +449,35 @@ export function composeTopBorder(input: TopBorderInput): string {
 
 	// 1) How much room does the working status want?
 	const naturalStatus = input.renderStatus(Math.max(0, input.width - STATUS_BLOCK_MIN));
-	const naturalStatusBlock = naturalStatus
-		? 3 + visibleWidth(naturalStatus) + 1
-		: 0;
+	const naturalStatusBlock = naturalStatus ? 3 + visibleWidth(naturalStatus) + 1 : 0;
 	const statusReserve = Math.min(
 		naturalStatusBlock,
 		Math.max(STATUS_BLOCK_MIN, Math.floor(input.width / 3)),
 	);
 
-	// 2) Stats take what is left after the status reserve — and after whatever the
-	// right block needs for its own gap and closing dash.
-	const statsBudget = Math.max(
-		0,
-		input.width - nameBlock - statusReserve - FILL_MIN - (nameWidth > 0 ? SEP_WIDTH : TAIL_WIDTH),
-	);
+	// 2) Stats take what is left after the status block (or the `──` lead).
+	const leftLead = statusReserve > 0 ? statusReserve : LEAD_WIDTH;
+	const statsBudget = Math.max(0, input.width - nameBlock - leftLead - FILL_MIN);
 	let stats = statsBudget > 0 ? input.renderStats(statsBudget) : "";
 	if (!stats) stats = "";
-	let statsWidth = visibleWidth(stats);
-	let sepWidth = statsWidth > 0 && nameWidth > 0 ? SEP_WIDTH : 0;
+	const statsWidth = visibleWidth(stats);
 
-	// 3) The status gets the remaining room (same allowance pi uses natively).
-	// `room` already contains the fill, so the allowance is `room - STATUS_BLOCK_MIN`.
-	let room = input.width - nameBlock - statsWidth - sepWidth;
-	let status = room > 0 ? input.renderStatus(Math.max(0, room - STATUS_BLOCK_MIN)) : "";
-	let statusBlock = status ? 3 + visibleWidth(status) + 1 : 0;
+	// 3) The status gets the remaining room; the allowance is the widest status
+	// that still leaves FILL_MIN dashes before the name, so a full "Working"
+	// survives whenever the reserve above did.
+	const room = input.width - nameBlock - statsWidth - FILL_MIN - (STATUS_BLOCK_MIN - 1);
+	const status = room > 0 ? input.renderStatus(Math.max(0, room)) : "";
+	const leadsWithStatus = status.length > 0;
 
-	// 4) Last resort on very narrow terminals: drop the stats, keep the spinner.
-	if (statusBlock > 0 && input.width - statusBlock - FILL_MIN < statsWidth + sepWidth + nameBlock) {
-		stats = "";
-		statsWidth = 0;
-		sepWidth = 0;
-		room = input.width - nameBlock;
-		status = room > 0 ? input.renderStatus(Math.max(0, room - STATUS_BLOCK_MIN)) : "";
-		statusBlock = status ? 3 + visibleWidth(status) + 1 : 0;
-	}
-
-	const tailWidth = statsWidth + nameWidth > 0 ? TAIL_WIDTH : 0;
+	const prefix = leadsWithStatus
+		? `── ${status} `
+		: statsWidth > 0
+			? input.border("─".repeat(LEAD_WIDTH))
+			: "";
 	const fill = Math.max(
 		0,
-		input.width - statusBlock - statsWidth - sepWidth - nameWidth - tailWidth,
+		input.width - visibleWidth(prefix) - statsWidth - nameBlock,
 	);
 
-	const head = status ? `── ${status} ` : "";
-	const right =
-		(statsWidth > 0 ? stats : "") +
-		// The gap before the session name is border too, so the line reads as one
-		// continuous rule instead of stopping and starting again.
-		(sepWidth > 0 ? input.border("─".repeat(SEP_WIDTH)) : "") +
-		nameLabel +
-		(tailWidth > 0 ? input.border("─") : "");
-
-	return head + input.border("─".repeat(fill)) + right;
+	return prefix + stats + input.border("─".repeat(fill)) + nameLabel + (nameBlock > 0 ? input.border("─") : "");
 }

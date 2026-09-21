@@ -239,30 +239,37 @@ test("tracker drops thinking tokens when the next message has none", () => {
 
 // ── stats line ───────────────────────────────────────────────────────────
 
-const FULL_LINE = "⚡42t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s 🧠12 ⏳2.1s";
-const FULL_WIDTH = visibleWidth(FULL_LINE);
+const FULL_LINE = "⚡42t/s 🔧3 ⏱1.2s 🧠12 ⏳2.1s";
+const FULL_WIDTH = visibleWidth(FULL_LINE); // 29
 
 test("stats line renders every segment in a stable order", () => {
-	assert.equal(visibleWidth(FULL_LINE), 42);
+	assert.equal(FULL_WIDTH, 29);
 	assert.equal(buildStatsLine(snapshot(), { showTtft: true, maxWidth: FULL_WIDTH, color: plain }), FULL_LINE);
 });
 
-test("stats line drops detail before tokens and tokens before the core", () => {
+test("stats line shows the TPS core instead of the token counts", () => {
+	// The ↑/↓ run totals are computed by the tracker but never drawn here: pi's
+	// own footer reports them one line below the border.
+	const line = buildStatsLine(snapshot(), { showTtft: true, maxWidth: 200, color: plain });
+	assert.ok(!line.includes("↑"), line);
+	assert.ok(!line.includes("↓"), line);
+});
+
+test("stats line drops detail before the core", () => {
 	const line = (maxWidth: number) =>
 		buildStatsLine(snapshot(), { showTtft: true, maxWidth, color: plain });
 
-	assert.equal(line(FULL_WIDTH - 1), "⚡42t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s 🧠12"); // ⏳ dropped
-	assert.equal(line(34), "⚡42t/s ↑12.3k ↓4.5k 🔧3 ⏱1.2s"); // 🧠 dropped
-	assert.equal(line(29), "⚡42t/s ↑12.3k ↓4.5k ⏱1.2s"); // 🔧 dropped
-	assert.equal(line(25), "⚡42t/s ↑12.3k ↓4.5k"); // ⏱ dropped
-	assert.equal(line(19), "⚡42t/s"); // tokens dropped
+	assert.equal(line(FULL_WIDTH - 1), "⚡42t/s 🔧3 ⏱1.2s 🧠12"); // ⏳ dropped
+	assert.equal(line(21), "⚡42t/s 🔧3 ⏱1.2s"); // 🧠 dropped
+	assert.equal(line(16), "⚡42t/s ⏱1.2s"); // 🔧 dropped
+	assert.equal(line(12), "⚡42t/s"); // ⏱ dropped
 	assert.equal(line(6), ""); // core alone does not fit either
 	assert.equal(line(7), "⚡42t/s");
 });
 
 test("stats line omits ttft unless it is enabled", () => {
 	const line = buildStatsLine(snapshot(), { showTtft: false, maxWidth: 100, color: plain });
-	assert.equal(line, "⚡42t/s ↑12.3k ↓4.5k 🔧3 🧠12 ⏳2.1s");
+	assert.equal(line, "⚡42t/s 🔧3 🧠12 ⏳2.1s");
 });
 
 test("stats line stays empty until there is something to show", () => {
@@ -291,15 +298,6 @@ test("stats line never degrades down to a lone placeholder", () => {
 	assert.equal(buildStatsLine(toolOnly, { showTtft: true, maxWidth: 3, color: plain }), "");
 });
 
-test("stats line keeps output tokens when the input count is unknown", () => {
-	const line = buildStatsLine(snapshot({ inputKnown: false, toolCount: 0, ttftMs: null, thinkTokens: null, llmDurationMs: null }), {
-		showTtft: true,
-		maxWidth: 100,
-		color: plain,
-	});
-	assert.equal(line, "⚡42t/s ↓4.5k");
-});
-
 // ── top border ───────────────────────────────────────────────────────────
 
 const NAME_LABEL = " feat/auth ";
@@ -323,22 +321,32 @@ function compose(options: {
 	});
 }
 
-test("border keeps the session name and the working status, degrading stats first", () => {
+test("border puts the stats left of the fill and the name at the right edge", () => {
 	const wide = compose({ width: 130 });
-	assert.ok(wide.includes("⠼ Working"));
-	assert.ok(wide.includes(" feat/auth "));
+	assert.ok(wide.includes("⠼ Working ⚡42t/s"), wide);
 	assert.ok(wide.includes("⏳2.1s"), "wide border keeps the full stats line");
+	assert.ok(wide.indexOf("⚡42t/s") < wide.indexOf(" feat/auth "), wide);
+	assert.ok(wide.endsWith(" feat/auth ─"), wide);
 	assert.equal(visibleWidth(wide), 130);
 
-	const narrow = compose({ width: 66 });
-	assert.ok(narrow.includes("⠼ Working"), "working status survives");
-	assert.ok(narrow.includes(" feat/auth "), "session name survives");
-	assert.ok(narrow.includes("⚡42t/s"));
+	// Narrower: the stats degrade, the status and the name stay.
+	const narrow = compose({ width: 45 });
+	assert.ok(narrow.includes("⠼ Working"), narrow);
+	assert.ok(narrow.includes(" feat/auth "), narrow);
+	assert.ok(narrow.includes("⚡42t/s"), narrow);
 	assert.ok(!narrow.includes("⏳"), "duration is the first thing to go");
 
 	const tiny = compose({ width: 30 });
 	assert.ok(tiny.includes(" feat/auth "), "session name is the last thing to go");
 	assert.equal(visibleWidth(tiny), 30);
+});
+
+test("border gives the idle stats their own ── lead", () => {
+	// No status to follow, so the stats get the same left margin a working
+	// border has instead of starting flush at column 0.
+	const idle = compose({ width: 80, withStatus: false });
+	assert.ok(idle.startsWith("──⚡42t/s"), idle);
+	assert.equal(visibleWidth(idle), 80);
 });
 
 test("border renders the stats line without a session name", () => {
@@ -352,7 +360,7 @@ test("border has no working status when the agent is idle", () => {
 	const idle = compose({ width: 80, withStatus: false });
 	assert.ok(!idle.includes("⠼"));
 	assert.ok(idle.includes("⚡42t/s"));
-	assert.ok(idle.startsWith("─"), "idle border is a plain dash run");
+	assert.ok(idle.endsWith(" feat/auth ─"), idle);
 	assert.equal(visibleWidth(idle), 80);
 });
 
