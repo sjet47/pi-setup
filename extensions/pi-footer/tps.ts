@@ -469,8 +469,11 @@ export function composeTopBorder(input: TopBorderInput): string {
 	const status = room > 0 ? input.renderStatus(Math.max(0, room)) : "";
 	const leadsWithStatus = status.length > 0;
 
+	// The dashes lead *and* are colored like the rest of the border (pi's own
+	// renderer wraps them in `borderColor`; leaving them raw drops them out of
+	// the thinking-level color the editor sets).
 	const prefix = leadsWithStatus
-		? `── ${status} `
+		? input.border("── ") + `${status} `
 		: statsWidth > 0
 			? input.border("─".repeat(LEAD_WIDTH))
 			: "";

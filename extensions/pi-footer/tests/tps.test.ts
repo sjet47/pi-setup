@@ -341,6 +341,29 @@ test("border puts the stats left of the fill and the name at the right edge", ()
 	assert.equal(visibleWidth(tiny), 30);
 });
 
+test("every dash on the border goes through the border colorizer", () => {
+	// pi sets `editor.borderColor` to the thinking-level color, and its own
+	// renderer wraps the whole left block in it. The `──` in front of an
+	// embedded status used to be emitted raw, which showed up as a white
+	// prefix on a colored border.
+	const RED = (text: string) => `\x1b[31m${text}\x1b[0m`;
+	for (const withStatus of [true, false]) {
+		for (const statsWidth of [0, 7, FULL_WIDTH]) {
+			const line = composeTopBorder({
+				width: 80,
+				nameLabel: NAME_LABEL,
+				border: RED,
+				renderStats: (maxWidth) =>
+					buildStatsLine(snapshot(), { showTtft: true, maxWidth: Math.min(maxWidth, statsWidth), color: plain }),
+				renderStatus: withStatus ? statusRenderer : () => "",
+			});
+			const uncolored = line.replace(/\x1b\[31m[^\x1b]*\x1b\[0m/g, "");
+			assert.ok(!uncolored.includes("─"), `uncolored dash in ${JSON.stringify(line)}`);
+			assert.equal(visibleWidth(line), 80);
+		}
+	}
+});
+
 test("border gives the idle stats their own ── lead", () => {
 	// No status to follow, so the stats get the same left margin a working
 	// border has instead of starting flush at column 0.
