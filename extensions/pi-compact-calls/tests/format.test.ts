@@ -166,14 +166,16 @@ test("typeBreakdown: by count, ties in order of appearance, empty for one type",
 	assert.equal(typeBreakdown([]), "");
 });
 
-test("headerState: no success before the block is closed", () => {
+test("headerState: running while a call runs, idle while open, settled once sealed", () => {
 	const done = [tool("bash", "ok"), tool("read", "ok")];
 	assert.equal(headerState(done, false), "idle");
-	assert.equal(headerState(done, true), "ok");
+	assert.equal(headerState(done, true), "settled");
 	assert.equal(headerState([...done, tool("bash", "running")], true), "running");
+	// Failures and calls that never ran do not change this: the header reports progress,
+	// not outcome.
 	assert.equal(headerState([...done, tool("bash", "failed")], false), "idle");
-	assert.equal(headerState([...done, tool("bash", "failed")], true), "failed");
-	assert.equal(headerState([...done, tool("bash", "queued")], true), "incomplete");
+	assert.equal(headerState([...done, tool("bash", "failed")], true), "settled");
+	assert.equal(headerState([...done, tool("bash", "queued")], true), "settled");
 });
 
 test("composeHeader: full line, then parts drop by priority", () => {
@@ -181,74 +183,57 @@ test("composeHeader: full line, then parts drop by priority", () => {
 		state: "running" as const,
 		icon: "⠋",
 		count: 7,
-		failed: 1,
 		durationMs: 3200,
 		breakdown: "4 read, 2 grep, 1 bash",
 		hint: "Ctrl+O to expand",
 	};
-	const full = "⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 1 failed · 3.2s · Ctrl+O to expand";
+	const full = "⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand";
 	assert.equal(composeHeader(parts, 200), full);
 	assert.equal(composeHeader(parts, visibleWidth(full)), full);
-	// hint first, then breakdown, then duration, then failed; the count always stays.
-	assert.equal(composeHeader(parts, visibleWidth(full) - 1), "⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 1 failed · 3.2s");
-	assert.equal(composeHeader(parts, 40), "⠋ 7 tool calls · 1 failed · 3.2s");
-	assert.equal(composeHeader(parts, 26), "⠋ 7 tool calls · 1 failed");
+	// hint first, then breakdown, then duration; the count always stays. Without the
+	// "1 failed" part the hint fits three columns earlier than it used to.
+	assert.equal(composeHeader(parts, visibleWidth(full) - 1), "⠋ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s");
+	assert.equal(composeHeader(parts, 40), "⠋ 7 tool calls · 3.2s · Ctrl+O to expand");
+	assert.equal(composeHeader(parts, 39), "⠋ 7 tool calls · 3.2s");
 	assert.equal(composeHeader(parts, 20), "⠋ 7 tool calls");
 	assert.equal(composeHeader(parts, 3), "⠋ 7 tool calls");
-	assert.equal(composeHeader({ ...parts, failed: 0, breakdown: undefined, hint: undefined }, 200), "⠋ 7 tool calls · 3.2s");
+	assert.equal(composeHeader({ ...parts, breakdown: undefined, hint: undefined }, 200), "⠋ 7 tool calls · 3.2s");
 });
 
 test("composeHeader: width is measured without ANSI codes", () => {
-	const parts = { state: "ok" as const, icon: "✓", count: 3, failed: 0, durationMs: 6100, hint: "Ctrl+O to expand" };
+	const parts = { state: "running" as const, icon: "⠋", count: 3, durationMs: 6100, hint: "Ctrl+O to expand" };
 	const plain = composeHeader(parts, 200);
 	const styled = composeHeader(parts, visibleWidth(plain), ansiPaint);
 	assert.equal(visibleWidth(styled), visibleWidth(plain));
 	assert.ok(styled.includes("Ctrl+O to expand"));
 });
 
-test("composeHeader: the block's last line keeps what the run did", () => {
-	const parts = {
-		state: "ok" as const,
-		icon: "✓",
+test("composeHeader: a settled header carries no success / failure / abort glyph", () => {
+	const settled = {
+		state: "settled" as const,
+		icon: "",
 		count: 3,
-		failed: 0,
 		durationMs: 6100,
 		breakdown: "2 bash, 1 read",
 		hint: "Ctrl+O to expand",
 	};
-	assert.equal(composeHeader(parts, 200), "✓ 3 tool calls (2 bash, 1 read) · 6.1s · Ctrl+O to expand");
+	const line = composeHeader(settled, 200);
+	assert.equal(line, "3 tool calls (2 bash, 1 read) · 6.1s · Ctrl+O to expand");
 	// Width still governs: the hint and the breakdown go before the count does.
-	assert.equal(composeHeader(parts, 40), "✓ 3 tool calls (2 bash, 1 read) · 6.1s");
-	assert.equal(composeHeader(parts, 30), "✓ 3 tool calls · 6.1s");
+	assert.equal(composeHeader(settled, 40), "3 tool calls (2 bash, 1 read) · 6.1s");
+	assert.equal(composeHeader(settled, 30), "3 tool calls · 6.1s");
+	// The header never says how the batch turned out — not with a glyph, not with a
+	// count of failures, not with an error tail — even when the batch did fail.
+	for (const forbidden of ["✓", "✗", "○", "failed", "—"]) {
+		assert.ok(!composeHeader(settled, 110).includes(forbidden), `settled header must not carry ${forbidden}`);
+	}
 });
 
-test("composeHeader: a failure keeps its error tail on the collapsed line", () => {
-	const parts = {
-		state: "failed" as const,
-		icon: "✗",
-		count: 4,
-		failed: 1,
-		durationMs: 5000,
-		hint: "Ctrl+O to expand",
-		errorTail: "cd: /nope: No such file or directory (exit 1)",
-	};
-	assert.equal(
-		composeHeader(parts, 200),
-		"✗ 4 tool calls · 1 failed · 5.0s — cd: /nope: No such file or directory (exit 1) · Ctrl+O to expand",
-	);
-	// The tail outranks the duration: what the failure was beats how long it took.
-	assert.equal(composeHeader(parts, 64), "✗ 4 tool calls · 1 failed — cd: /nope: No such file or dire…");
-	// Too narrow for a readable tail ⇒ dropped whole, not cut to pieces.
-	assert.equal(composeHeader(parts, 26), "✗ 4 tool calls · 1 failed");
-	assert.equal(composeHeader(parts, 24), "✗ 4 tool calls");
-	// A short tail is shown in full even when it eats half the line.
-	assert.equal(composeHeader({ ...parts, errorTail: "exit 1" }, 200), "✗ 4 tool calls · 1 failed · 5.0s — exit 1 · Ctrl+O to expand");
-	// A whole tail beats the hint on an otherwise full line: the hint goes first.
-	const failure = { state: "failed" as const, icon: "✗", count: 3, failed: 1, durationMs: 2000, hint: "Ctrl+O to expand" };
-	assert.equal(
-		composeHeader({ ...failure, errorTail: "cd: /nonexistent-dir-xyz: No such file or directory (exit 1)" }, 110),
-		"✗ 3 tool calls · 1 failed · 2.0s — cd: /nonexistent-dir-xyz: No such file or directory (exit 1)",
-	);
+test("composeHeader: the idle and running headers keep their progress glyph", () => {
+	const base = { count: 3, durationMs: 6100, hint: "Ctrl+O to expand" };
+	assert.equal(composeHeader({ ...base, state: "running", icon: "⠋" }, 200), "⠋ 3 tool calls · 6.1s · Ctrl+O to expand");
+	// Block still open but nothing executing (the model is producing the next call).
+	assert.equal(composeHeader({ ...base, state: "idle", icon: "⠿" }, 200), "⠿ 3 tool calls · 6.1s · Ctrl+O to expand");
 });
 
 test("composeToolLine: the summary gives way, the duration survives", () => {

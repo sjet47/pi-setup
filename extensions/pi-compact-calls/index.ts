@@ -593,22 +593,11 @@ function headerIcon(state: ReturnType<typeof headerState>, now: number): string 
 			return spinnerFrame(now);
 		case "idle":
 			return IDLE_ICON;
-		case "ok":
-			return "✓";
-		case "failed":
-			return "✗";
-		case "incomplete":
-			return QUEUED_ICON;
+		// Sealed: the header is a summary, not a verdict — no success / failure /
+		// abort glyph. The tool lines carry the outcome.
+		case "settled":
+			return "";
 	}
-}
-
-/** Error tail of the most recent failed call, for a collapsed block's stat line. */
-function collapsedErrorTail(tools: readonly ToolEntry[]): string | undefined {
-	for (let index = tools.length - 1; index >= 0; index -= 1) {
-		const tool = tools[index]!;
-		if (toolState(tool) === "failed" && tool.errorTail) return tool.errorTail;
-	}
-	return undefined;
 }
 
 function renderGroupBlock(group: ToolGroup, width: number): string[] {
@@ -625,17 +614,15 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	const intervals = group.tools
 		.filter((tool) => tool.startedAt !== undefined)
 		.map((tool) => ({ start: tool.startedAt!, end: tool.endedAt }));
-	const headerLine = (icon: string, hint?: string, errorTail?: string) =>
+	const headerLine = (icon: string, hint?: string) =>
 		composeHeader(
 			{
 				state,
 				icon,
 				count: group.tools.length,
-				failed: group.tools.filter((tool) => toolState(tool) === "failed").length,
 				durationMs: group.replay ? undefined : unionDuration(intervals, now),
 				breakdown: typeBreakdown(group.tools.map((tool) => tool.name)) || undefined,
 				hint,
-				errorTail,
 			},
 			contentWidth,
 			paint,
@@ -656,9 +643,10 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 		visible = [pickCollapsedTool(group.tools)];
 		lines.push(headerLine(headerIcon(state, now), EXPAND_HINT));
 	} else {
-		// Done: the header line is all that is left of the batch, so it carries what the
-		// block did (`1 failed`) and why it failed (the error tail).
-		lines.push(headerLine(headerIcon(state, now), EXPAND_HINT, collapsedErrorTail(group.tools)));
+		// Done: the header line is all that is left of the batch. It says what the block
+		// did (how many calls, how long, which tools), never whether it failed — expand to
+		// see the individual outcomes.
+		lines.push(headerLine(headerIcon(state, now), EXPAND_HINT));
 	}
 
 	visible.forEach((tool, index) => {

@@ -370,27 +370,27 @@ export function unionDuration(intervals: readonly Interval[], now: number): numb
 }
 
 /**
- * - running:    some call is executing.
- * - idle:       nothing executing, block still open — the model is producing the
- *               next call, so the outcome is not settled yet.
- * - ok / failed / incomplete: closed block; incomplete = some call never ran.
+ * What the header line reports: whether the batch is still moving, never how it
+ * turned out. Success, failure and abort are deliberately not distinguished here —
+ * the tool lines carry the outcome, the header only says "still working" or "this
+ * batch is over".
+ *
+ * - running: some call is executing.
+ * - idle:    nothing executing, block still open — the model is producing the
+ *            next call.
+ * - settled: the block is sealed.
  */
-export type HeaderState = "running" | "idle" | "ok" | "failed" | "incomplete";
+export type HeaderState = "running" | "idle" | "settled";
 
 export function headerState(tools: readonly ToolView[], closed: boolean): HeaderState {
 	if (tools.some((tool) => tool.pending)) return "running";
-	if (!closed) return "idle";
-	if (tools.some((tool) => toolState(tool) === "failed")) return "failed";
-	if (tools.some((tool) => toolState(tool) !== "ok")) return "incomplete";
-	return "ok";
+	return closed ? "settled" : "idle";
 }
 
 const HEADER_COLORS: Record<HeaderState, string> = {
 	running: "accent",
 	idle: "muted",
-	ok: "success",
-	failed: "error",
-	incomplete: "muted",
+	settled: "muted",
 };
 
 /**
@@ -409,71 +409,48 @@ export function typeBreakdown(names: readonly string[]): string {
 
 export type HeaderParts = {
 	state: HeaderState;
+	/**
+	 * Leading state glyph: the spinner while a call runs, the idle glyph while the
+	 * block is still open, and nothing at all once it is sealed. Empty means no glyph,
+	 * so a settled header starts straight at the count.
+	 */
 	icon: string;
 	count: number;
-	failed: number;
 	/** Omitted when no timing is known (a replayed block): the line then shows no duration. */
 	durationMs?: number;
 	/** e.g. "4 read, 2 grep, 1 bash"; shown in parentheses after the count. */
 	breakdown?: string;
 	/** Dim trailing hint, e.g. "Ctrl+O to expand" (collapsed blocks only). */
 	hint?: string;
-	/**
-	 * A failed call's error tail: what is left of the failure once the block
-	 * collapses to its header line. Room for it is reserved first, so the numbers give
-	 * up their optional parts before it loses its own; it is dropped (rather than cut
-	 * into unreadable pieces) when even that does not fit.
-	 */
-	errorTail?: string;
 };
 
 /**
  * Compose the block header — the line a collapsed block keeps — for `width` columns.
  * When it does not fit, optional parts are dropped lowest priority first; the priority
- * (high → low) is count > failed > error tail > duration > breakdown > hint.
+ * (high → low) is count > duration > breakdown > hint. The count alone always fits.
+ *
+ * The header reports progress, not outcome: it never says whether a call failed or
+ * was aborted (see HeaderState).
  */
 export function composeHeader(parts: HeaderParts, width: number, paint: Paint = PLAIN_PAINT): string {
 	const color = HEADER_COLORS[parts.state];
 	const sep = ` ${paint.fg("muted", "·")} `;
-	const head = `${paint.fg(color, parts.icon)} ${paint.fg(color, paint.bold(`${parts.count} tool calls`))}`;
-	// A collapsed block is the only trace of a failure, so its reason keeps its room:
-	// the numbers give up the breakdown and the duration before the tail is cut. Half
-	// the width is the most the tail may take.
-	const failedText = parts.failed > 0 ? sep + paint.fg("error", `${parts.failed} failed`) : "";
-	const tailLead = " — ";
-	const tailWanted = parts.errorTail ? visibleWidth(parts.errorTail) : 0;
-	const tailRoomLeft = width - visibleWidth(head) - visibleWidth(failedText) - visibleWidth(tailLead);
-	const hintWidth = parts.hint ? visibleWidth(sep) + visibleWidth(parts.hint) : 0;
-	// A whole error tail is worth more than the expand hint, so the hint yields to it;
-	// half the width is still the most any one error may take.
-	let tailBudget = Math.min(
-		tailWanted,
-		Math.max(Math.floor(width / 2), tailRoomLeft - hintWidth),
-		Math.max(0, tailRoomLeft),
-	);
-	// A cut tail must stay readable; one that fits whole is always fine.
-	if (tailBudget < Math.min(MIN_ERROR_TAIL_WIDTH, tailWanted)) tailBudget = 0;
-	const tailRoom = tailBudget > 0 ? tailBudget + visibleWidth(tailLead) : 0;
+	const head =
+		(parts.icon ? `${paint.fg(color, parts.icon)} ` : "") +
+		paint.fg(color, paint.bold(`${parts.count} tool calls`));
 
 	// Display order; `drop` is the order in which parts are given up (0 first).
 	const optional: { text: string; drop: number }[] = [];
 	if (parts.breakdown) optional.push({ text: ` ${paint.fg("dim", `(${parts.breakdown})`)}`, drop: 1 });
-	if (parts.failed > 0) optional.push({ text: failedText, drop: 3 });
 	if (parts.durationMs !== undefined) optional.push({ text: sep + paint.fg("muted", formatDuration(parts.durationMs)), drop: 2 });
 
 	let kept = optional;
 	let line: string;
 	for (;;) {
 		line = head + kept.map((part) => part.text).join("");
-		if (visibleWidth(line) <= width - tailRoom || kept.length === 0) break;
+		if (visibleWidth(line) <= width || kept.length === 0) break;
 		const lowest = Math.min(...kept.map((part) => part.drop));
 		kept = kept.filter((part) => part.drop !== lowest);
-	}
-	if (tailBudget > 0) {
-		const shown = Math.min(tailBudget, Math.max(0, width - visibleWidth(line) - visibleWidth(tailLead)));
-		if (shown >= Math.min(MIN_ERROR_TAIL_WIDTH, tailWanted)) {
-			line += paint.fg("dim", tailLead) + paint.fg("error", truncatePlain(parts.errorTail!, shown));
-		}
 	}
 	// The hint is the first thing to go and the last thing on the line.
 	if (parts.hint) {
