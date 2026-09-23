@@ -111,6 +111,30 @@ test("tracker smooths tps and settles once the window grows", () => {
 	assert.ok(second < first, `expected ${second} < ${first}`);
 });
 
+test("tracker keeps one generation window across thinking and text", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.beforeProviderRequest(T0);
+	tracker.messageStart(T0 + 10);
+
+	// 800 thinking characters (200 tokens) over one second: the first sample is
+	// the documented 100ms-floor spike, the second is the plain rate.
+	tracker.messageDelta(T0 + 1_010, { thinking: 400 });
+	assert.equal(tracker.snapshot(T0 + 1_010)?.tps, 1000);
+	tracker.messageDelta(T0 + 2_010, { thinking: 400 });
+	assert.equal(tracker.snapshot(T0 + 2_010)?.tps, 880); // 0.15*200 + 0.85*1000
+
+	// Thinking ends: 700 text characters (200 more tokens) arrive two seconds into
+	// the window. The clock keeps running from the first content, so the numerator
+	// (400 tokens) and the denominator (2s) still cover the same span and the
+	// sample drops to 200 t/s. Restarting the window at the first text delta would
+	// leave all 400 tokens in the numerator against the 0.1s floor: a raw 4000 t/s
+	// and an EMA of 1348 instead of 778.
+	tracker.messageDelta(T0 + 3_010, { text: 700 });
+	assert.equal(tracker.snapshot(T0 + 3_010)?.tps, 778); // 0.15*200 + 0.85*880
+});
+
 test("tracker folds a finished message into the run totals and freezes it", () => {
 	const tracker = new TpsTracker();
 	tracker.agentStart();
@@ -134,6 +158,26 @@ test("tracker folds a finished message into the run totals and freezes it", () =
 	assert.ok(second);
 	assert.equal(second.inputTokens, 2_500); // 1_000 + 1_500
 	assert.equal(second.outputTokens, 140); // 120 + 20
+});
+
+test("tracker restarts the tps EMA on every message", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.beforeProviderRequest(T0);
+	// Message 1 runs fast: 100 estimated tokens over the 0.1s window floor.
+	tracker.messageStart(T0 + 10);
+	tracker.messageDelta(T0 + 1_000, { text: 350 });
+	tracker.messageEnd(T0 + 1_000, { input: 10, output: 100 });
+	assert.equal(tracker.snapshot(T0 + 1_000)?.tps, 1000);
+
+	// Message 2 is ten times slower and its first sample is 10 tokens over the
+	// same floor window. Blending that into the previous message's EMA would carry
+	// 85% of the old rate over (0.15*100 + 0.85*1000 = 865); the line always
+	// describes the current message, so the smoothing starts over here.
+	tracker.messageStart(T0 + 2_000);
+	tracker.messageDelta(T0 + 2_100, { text: 35 });
+	assert.equal(tracker.snapshot(T0 + 2_100)?.tps, 100);
 });
 
 test("tracker reports tokens/s against upstream's 100ms window floor", () => {
@@ -179,6 +223,56 @@ test("tracker uses reported usage for display and tps alike", () => {
 	// Same numerator for tps: 40 over the 0.1s floor window. Using the estimate
 	// (100 tokens) would give 1000 here.
 	assert.equal(s.tps, 400);
+});
+
+test("tracker does not let a stalled reported count pin the estimate", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.beforeProviderRequest(T0);
+	// Anthropic opens the stream with a placeholder output count, and pi hands the
+	// tracker that same unchanged usage object with every delta.
+	tracker.messageStart(T0 + 10, { input: 400, output: 1 });
+	tracker.messageDelta(T0 + 1_010, { text: 350, usage: { input: 400, output: 1 } });
+	const first = tracker.snapshot(T0 + 1_010);
+	assert.equal(first?.outputTokens, 100, "the placeholder must not freeze the counter");
+	assert.equal(first?.tps, 1000);
+
+	// Still 1 after another 350 characters: the count stopped advancing, so the
+	// estimate keeps the line moving. A frozen 1 would leave the counter at 1 and
+	// the second sample at 9 t/s.
+	tracker.messageDelta(T0 + 2_010, { text: 350, usage: { input: 400, output: 1 } });
+	const stalled = tracker.snapshot(T0 + 2_010);
+	assert.equal(stalled?.outputTokens, 200);
+	assert.equal(stalled?.tps, 880); // 200 tokens over 1s, blended
+
+	// The trailing revision is the provider's final word for the message: it wins
+	// outright, and because the final sample is recomputed over the whole message
+	// it becomes that message's real rate (250 tokens over 1s) rather than staying
+	// on the 880 t/s mid-stream sample.
+	tracker.messageEnd(T0 + 2_010, { input: 400, output: 250 });
+	const done = tracker.snapshot(T0 + 3_000);
+	assert.equal(done?.outputTokens, 250);
+	assert.equal(done?.inputTokens, 400);
+	assert.equal(done?.tps, 250);
+
+	// A placeholder that never gets revised is not a final count either: the frozen
+	// sample falls back to the estimate, while the run totals still take the
+	// reported value — the estimate never enters them.
+	const stuck = new TpsTracker();
+	stuck.agentStart();
+	stuck.turnStart();
+	stuck.beforeProviderRequest(T0);
+	stuck.messageStart(T0 + 10, { input: 400, output: 1 });
+	stuck.messageDelta(T0 + 1_010, { text: 350, usage: { input: 400, output: 1 } });
+	stuck.messageDelta(T0 + 2_010, { text: 350, usage: { input: 400, output: 1 } });
+	stuck.messageEnd(T0 + 2_010, { input: 400, output: 1 });
+	const frozen = stuck.snapshot(T0 + 4_000);
+	assert.equal(frozen?.tps, 200); // the estimate, over the whole 1s window
+	assert.equal(frozen?.outputTokens, 200); // display uses the same estimate as tps
+	assert.equal(frozen?.inputTokens, 400);
+	stuck.messageStart(T0 + 5_000);
+	assert.equal(stuck.snapshot(T0 + 5_000)?.outputTokens, 1); // only the reported count carries forward
 });
 
 test("tracker keeps estimates out of the run totals", () => {

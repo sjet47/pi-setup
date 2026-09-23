@@ -62,7 +62,7 @@ export interface TpsDelta {
 // Tuning constants carried over from upstream (upstream clamps the generation
 // window to 0.1s first, which makes its 0.05 clamp unreachable — 0.1 is the
 // effective floor).
-const REFRESH_MS = 80; // throttle for the EMA update
+const REFRESH_MS = 80; // throttle for the mid-stream EMA update
 const EMA_WEIGHT = 0.15;
 const MIN_ELAPSED_S = 0.1;
 const THINK_CHARS_PER_TOKEN = 4;
@@ -72,8 +72,20 @@ const TEXT_CHARS_PER_TOKEN = 3.5;
  * Event-driven TPS state machine.
  *
  * Mirrors the numbers pi-tps showed: tokens/s smoothed over the current
- * message's pure generation window, cumulative input/output per agent run,
- * per-run tool count, TTFT and the LLM call duration.
+ * message's generation window, cumulative input/output per agent run, per-run
+ * tool count, TTFT and the LLM call duration.
+ *
+ * The TPS line always describes *one* message's generation rate:
+ *
+ *  - the EMA starts over at every `messageStart`, so a slow message is not
+ *    dragged down by the fast one before it (and vice versa);
+ *  - numerator and window cover the same span — content accumulates and the
+ *    clock starts at `firstContentTime`, so ending thinking does not reset the
+ *    denominator while the thinking tokens stay in the numerator;
+ *  - the numerator prefers reported usage while it is *current* and falls back
+ *    to the character estimate otherwise (see `outputTokensNow`);
+ *  - `messageEnd` recomputes the rate over the whole message window and lets it
+ *    replace the EMA, so the frozen line ends up near the message's real rate.
  */
 export class TpsTracker {
 	private working = false;
@@ -92,9 +104,10 @@ export class TpsTracker {
 	private msgDisplayInput = 0;
 	private msgDisplayOutput = 0;
 	private firstContentTime = 0;
-	private textStartTime = 0;
 	private streamedTextLen = 0;
 	private streamedThinkLen = 0;
+	/** Content chars streamed when the reported output count was last revised. */
+	private usageAnchorChars = 0;
 	private lastEmaAt = 0;
 	private smoothedTps = 0;
 
@@ -118,9 +131,9 @@ export class TpsTracker {
 		this.msgDisplayInput = 0;
 		this.msgDisplayOutput = 0;
 		this.firstContentTime = 0;
-		this.textStartTime = 0;
 		this.streamedTextLen = 0;
 		this.streamedThinkLen = 0;
+		this.usageAnchorChars = 0;
 		this.lastEmaAt = 0;
 		this.smoothedTps = 0;
 		this.totalInput = 0;
@@ -154,27 +167,38 @@ export class TpsTracker {
 		this.msgDisplayInput = 0;
 		this.msgDisplayOutput = 0;
 		this.firstContentTime = 0;
-		this.textStartTime = 0;
 		this.streamedTextLen = 0;
 		this.streamedThinkLen = 0;
+		// Nothing streamed yet, so a count coming from `message_start` is current
+		// until the first content delta arrives.
+		this.usageAnchorChars = 0;
 		this.lastEmaAt = 0;
+		// The line shows this message's rate: the previous message's EMA must not
+		// leak into it (a single 0.15-weighted sample would carry ~85% of it over).
+		this.smoothedTps = 0;
 	}
 
 	messageDelta(now: number, delta: TpsDelta): void {
 		if (delta.text) this.streamedTextLen += delta.text;
 		if (delta.thinking) this.streamedThinkLen += delta.thinking;
 		if (delta.usage) {
-			this.liveUsageInput = delta.usage.input ?? this.liveUsageInput;
-			this.liveUsageOutput = delta.usage.output ?? this.liveUsageOutput;
+			if (delta.usage.input !== undefined) this.liveUsageInput = delta.usage.input;
+			const output = delta.usage.output;
+			// pi hands the same usage object to every `message_update`, so only a
+			// *changed* count is a revision; an unchanged one keeps its old anchor and
+			// therefore reads as stale as soon as more content arrives.
+			if (output !== undefined && output !== this.liveUsageOutput) {
+				this.liveUsageOutput = output;
+				this.usageAnchorChars = this.streamedChars();
+			}
 		}
 
 		const hasContent =
 			this.streamedTextLen > 0 || this.streamedThinkLen > 0 || (delta.hasThinkingContent ?? false);
-		// First content (text or thinking) marks TTFT; first text delta ends thinking.
+		// First content (text or thinking) marks TTFT and starts the TPS window.
 		if (this.firstContentTime === 0 && hasContent) this.firstContentTime = now;
-		if (this.textStartTime === 0 && (delta.text ?? 0) > 0) this.textStartTime = now;
 
-		this.refreshTps(now, this.liveOutputTokens());
+		this.refreshTps(now, this.outputTokensNow());
 	}
 
 	messageEnd(now: number, usage?: TpsUsage): void {
@@ -182,15 +206,29 @@ export class TpsTracker {
 		this.messageLive = false;
 		this.msgEndTime = now;
 
-		// Display keeps the estimate when the provider reported nothing; the run
-		// totals only take reported usage (upstream behaves the same way, so an
-		// aborted message does not inflate the following messages).
 		const reportedOutput = usage?.output ?? 0;
-		const displayOutput = this.reportedOrEstimate(reportedOutput);
-		this.msgDisplayOutput = reportedOutput > 0 ? 0 : displayOutput;
+		// The end-of-stream usage is the provider's final word — Anthropic delivers
+		// the real `output_tokens` in the trailing `message_delta`, which reaches us
+		// as a revision here. A value that never moved since `message_start` is the
+		// opening placeholder, not a final count, so it does not get adopted.
+		if (reportedOutput > 0 && reportedOutput !== this.liveUsageOutput) {
+			this.liveUsageOutput = reportedOutput;
+			this.usageAnchorChars = this.streamedChars();
+		}
+		const displayOutput = this.outputTokensNow();
+
+		// Freeze the estimate when the provider supplied no usable final count.
+		// Run totals still use reported usage, so an aborted message cannot inflate
+		// the following message's baseline.
+		// The run total already includes the reported count. Keep only the
+		// difference so the frozen display matches the tokens used for TPS.
+		this.msgDisplayOutput = displayOutput - reportedOutput;
 		this.msgDisplayInput = 0;
-		// Force the final sample past the throttle: this one carries the exact count.
-		this.refreshTps(now, displayOutput, true);
+		// The final sample is computed over the whole message, so it already *is*
+		// this message's rate: it replaces the EMA instead of being blended in with
+		// weight 0.15, which would leave the frozen line on the last mid-stream
+		// sample even though the exact count just arrived.
+		this.finalizeTps(now, displayOutput);
 
 		this.totalInput += Math.max(usage?.input ?? 0, this.msgStartInputTokens);
 		this.totalOutput += reportedOutput;
@@ -214,7 +252,7 @@ export class TpsTracker {
 		if (!this.hasRun) return null;
 
 		const live = this.messageLive;
-		const currentOutput = live ? this.liveOutputTokens() : this.msgDisplayOutput;
+		const currentOutput = live ? this.outputTokensNow() : this.msgDisplayOutput;
 		const currentInput = live
 			? Math.max(this.liveUsageInput, this.msgStartInputTokens)
 			: this.msgDisplayInput;
@@ -243,32 +281,65 @@ export class TpsTracker {
 		return this.working;
 	}
 
-	private refreshTps(now: number, tokens: number, force = false): void {
+	/** Mid-stream sample: throttled, and blended into the message's own EMA. */
+	private refreshTps(now: number, tokens: number): void {
 		if (tokens <= 0) return;
-		if (!force && this.lastEmaAt > 0 && now - this.lastEmaAt < REFRESH_MS) return;
+		if (this.lastEmaAt > 0 && now - this.lastEmaAt < REFRESH_MS) return;
 		this.lastEmaAt = now;
 
-		const elapsed = Math.max((now - this.generationStart()) / 1000, MIN_ELAPSED_S);
-		const raw = tokens / elapsed;
+		const raw = tokens / this.elapsedSeconds(now);
 		this.smoothedTps = this.smoothedTps === 0 ? raw : EMA_WEIGHT * raw + (1 - EMA_WEIGHT) * this.smoothedTps;
 	}
 
 	/**
-	 * Output tokens to show/smooth right now: reported usage wins (it is the exact
-	 * count), the character estimate is the fallback while streaming. Display and
-	 * TPS always use the same number.
+	 * Final sample at `message_end`: the window covers the whole message, so the
+	 * value is an average already and supersedes the mid-stream EMA (the throttle
+	 * does not apply — this may follow the last delta by a few milliseconds).
 	 */
-	private liveOutputTokens(): number {
-		return this.reportedOrEstimate(this.liveUsageOutput);
+	private finalizeTps(now: number, tokens: number): void {
+		if (tokens <= 0) return;
+		this.lastEmaAt = now;
+		this.smoothedTps = tokens / this.elapsedSeconds(now);
 	}
 
-	private reportedOrEstimate(reported: number): number {
-		return reported > 0 ? reported : this.estimateOutputTokens();
+	/**
+	 * Output tokens to show/smooth right now. Display and TPS always use the same
+	 * number.
+	 *
+	 * Reported usage and the character estimate are *different units* — a real
+	 * token count versus `chars / 3.5` — so the two are never compared
+	 * numerically; the estimate is not a lower bound for the reported count, and a
+	 * reported count below the estimate is not treated as wrong. What decides is
+	 * currency: the reported count wins only while nothing has streamed since it
+	 * was last revised. Otherwise a provider that opens with a placeholder count
+	 * (Anthropic sends `output_tokens: 1` in `message_start`, and pi hands us that
+	 * same count on every delta until it is revised) would pin both the counter and
+	 * the rate for the rest of the message. The price is that a count revised once
+	 * and then left behind is dropped in favour of the estimate until it is revised
+	 * again (or until `message_end`).
+	 */
+	private outputTokensNow(): number {
+		const reported = this.liveUsageOutput;
+		const current = reported > 0 && this.usageAnchorChars === this.streamedChars();
+		return current ? reported : this.estimateOutputTokens();
 	}
 
-	/** TPS window: text generation > first content > message start. */
+	private streamedChars(): number {
+		return this.streamedTextLen + this.streamedThinkLen;
+	}
+
+	/**
+	 * TPS window: the message's generation phase, i.e. since the first content
+	 * delta. Content and clock start at the same instant, so the numerator and the
+	 * denominator always cover the same span — a thinking→text switch neither
+	 * rewinds the clock nor drops the thinking tokens already counted.
+	 */
 	private generationStart(): number {
-		return this.textStartTime || this.firstContentTime || this.msgStartTime;
+		return this.firstContentTime || this.msgStartTime;
+	}
+
+	private elapsedSeconds(now: number): number {
+		return Math.max((now - this.generationStart()) / 1000, MIN_ELAPSED_S);
 	}
 
 	private estimateOutputTokens(): number {

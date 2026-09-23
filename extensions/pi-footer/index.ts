@@ -1,14 +1,19 @@
 import {
 	CustomEditor,
+	getAgentDir,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
-import { existsSync, readFileSync, promises as fsPromises } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
+import {
+	describeSaveOutcome,
+	FooterConfigStore,
+	footerConfigPath,
+	type FooterConfig,
+	type SaveOutcome,
+} from "./config.ts";
 import {
 	buildStatsLine,
 	composeTopBorder,
@@ -42,37 +47,6 @@ import {
  * keeps ownership so its "↑ n more" overflow indicator stays intact; the name
  * and the stats line are skipped in that case.
  */
-
-// ── config ───────────────────────────────────────────────────────────────
-
-interface FooterConfig {
-	/** Show the live TPS stats line in the border. */
-	showStats: boolean;
-	/** Include the TTFT segment. */
-	showTtft: boolean;
-	/** "theme" follows the pi theme; otherwise one of the inherited presets. */
-	colorPreset: string;
-}
-
-const CONFIG_DEFAULTS: FooterConfig = { showStats: true, showTtft: true, colorPreset: "theme" };
-const CONFIG_PATH = join(homedir(), ".pi", "agent", "pi-footer.json");
-
-function loadConfig(): FooterConfig {
-	try {
-		if (existsSync(CONFIG_PATH)) {
-			const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as Partial<FooterConfig>;
-			return { ...CONFIG_DEFAULTS, ...parsed };
-		}
-	} catch {
-		/* fall through to defaults on malformed JSON */
-	}
-	return { ...CONFIG_DEFAULTS };
-}
-
-function saveConfig(update: Partial<FooterConfig>): void {
-	const next = { ...loadConfig(), ...update };
-	fsPromises.writeFile(CONFIG_PATH, JSON.stringify(next, null, 2) + "\n").catch(() => {});
-}
 
 // ── colors ───────────────────────────────────────────────────────────────
 
@@ -167,7 +141,9 @@ const DELTA_RENDER_MS = 80;
 
 export default function (pi: ExtensionAPI) {
 	const tracker = new TpsTracker();
-	let config = loadConfig();
+	// getAgentDir() honours PI_CODING_AGENT_DIR; the store owns read/write of the file.
+	const store = new FooterConfigStore(footerConfigPath(getAgentDir()));
+	let config = store.current;
 	let requestRender: (() => void) | undefined;
 	let lastDeltaRender = 0;
 
@@ -178,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		config = loadConfig();
+		config = store.reload();
 
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 			requestRender = () => tui.requestRender();
@@ -268,6 +244,22 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("pi-footer", {
 		description: "Configure the input box border (TPS stats, TTFT, colors)",
 		handler: async (_args, ctx) => {
+			// Applies immediately (the border repaints with the new value) and reports the
+			// disk outcome separately: a failed write must not look like a success.
+			const apply = async (update: Partial<FooterConfig>, label: string): Promise<void> => {
+				const saved = store.set(update);
+				config = store.current;
+				repaint();
+				let outcome: SaveOutcome = { ok: true };
+				try {
+					await saved;
+				} catch (error) {
+					outcome = { ok: false, error };
+				}
+				const { message, level } = describeSaveOutcome(label, outcome);
+				ctx.ui.notify(message, level);
+			};
+
 			const choices = [
 				`TPS stats         [${config.showStats ? "on" : "off"}]`,
 				`Show TTFT         [${config.showTtft ? "on" : "off"}]`,
@@ -277,13 +269,11 @@ export default function (pi: ExtensionAPI) {
 			if (!choice) return;
 
 			if (choice === choices[0]) {
-				config = { ...config, showStats: !config.showStats };
-				saveConfig({ showStats: config.showStats });
-				ctx.ui.notify(`showStats = ${config.showStats ? "on" : "off"}`, "info");
+				const showStats = !config.showStats;
+				await apply({ showStats }, `showStats = ${showStats ? "on" : "off"}`);
 			} else if (choice === choices[1]) {
-				config = { ...config, showTtft: !config.showTtft };
-				saveConfig({ showTtft: config.showTtft });
-				ctx.ui.notify(`showTtft = ${config.showTtft ? "on" : "off"}`, "info");
+				const showTtft = !config.showTtft;
+				await apply({ showTtft }, `showTtft = ${showTtft ? "on" : "off"}`);
 			} else if (choice === choices[2]) {
 				const options = [
 					"theme (follow the pi theme)",
@@ -294,12 +284,9 @@ export default function (pi: ExtensionAPI) {
 				];
 				const picked = await ctx.ui.select("Color preset:", options);
 				if (!picked) return;
-				config = { ...config, colorPreset: picked.startsWith("theme") ? "theme" : picked.split("  ")[0] };
-				saveConfig({ colorPreset: config.colorPreset });
-				ctx.ui.notify(`colorPreset = ${config.colorPreset}`, "info");
+				const colorPreset = picked.startsWith("theme") ? "theme" : picked.split("  ")[0];
+				await apply({ colorPreset }, `colorPreset = ${colorPreset}`);
 			}
-
-			repaint();
 		},
 	});
 

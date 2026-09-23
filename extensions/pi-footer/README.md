@@ -21,7 +21,7 @@
 
 ## 配置
 
-`~/.pi/agent/pi-footer.json`（不存在则用默认值，改动只能通过命令写入）：
+`<Pi agent dir>/pi-footer.json`（默认 `~/.pi/agent/pi-footer.json`；设置 `PI_CODING_AGENT_DIR` 时跟随该目录）。文件不存在则用默认值，改动通过 `/pi-footer` 写入；保存失败会报错，当前会话仍应用新值，下一次成功保存时会一并写入：
 
 ```json
 {
@@ -51,7 +51,7 @@
 
 | 段 | 定义 |
 |----|------|
-| `⚡Nt/s` | 当前消息**纯生成窗口**（首字之后）的 token 估算 / 时长，再做 EMA（0.15 权重、80ms 节流）平滑。首个样本会明显偏高：窗口被夹在下限 100ms（与上游等效下限一致），随后收敛 |
+| `⚡Nt/s` | 当前消息的生成速率（首字之后 → `now`），再做 EMA（0.15 权重、80ms 节流）平滑。EMA **在每条消息的 `messageStart` 清零**，所以显示的永远是这一条消息自己的速率；分子与窗口同窗（thinking→text 不重置计时，也不把已计入的 thinking token 踢出分子）；`message_end` 用整条消息的窗口重算并**替换** EMA（冻结值≈这条消息的真实均值） |
 | `🔧` | 本 run 的工具调用次数 |
 | `⏱` | TTFT = 首个内容（正文或 thinking）到达 − `before_provider_request` 时刻 |
 | `🧠` | 当前消息 thinking 字符数 / 4 |
@@ -59,7 +59,7 @@
 
 TTFT 与耗时都按「本条消息的请求发出时刻」计算，因此消息结束后数值冻结、不会随 `now` 继续增长。TTFT 以**有内容**的首个 thinking / 正文为准（pi 会先建一个空的 thinking 块，不能把它当首字）。
 
-token 在流式期间按字符估算（thinking /4、正文 /3.5），provider 报了 `usage` 就用它，且**展示与 tps 共用同一个数**（不会一个用上报值、一个用估算值）。`message_end` 时：上报值进入 run 累计，**估算值只用于这一条的冻结展示、不进入累计**（被中断的消息不会虚增后续消息的 `↑↓`）。
+token 在流式期间按字符估算（thinking /4、正文 /3.5），且**展示与 tps 共用同一个数**（不会一个用上报值、一个用估算值）。上报值不是无条件优先：`usage.output` 是真实 token 数、估算值是字符除以系数，**两者单位不同、不做数值比较**，判断标准是「这个计数还新不新鲜」——只有被**修订**（值变了）且此后**没有新内容**到达时才采用。所以 Anthropic 在 `message_start` 给的占位 `output_tokens: 1`（pi 在它被修订前，每个 delta 递的都是同一个计数）不会把计数和速率钉死在这一条上；代价是「只修订过一次就停住」的上报值会被估算接管，直到它再次修订。`message_end` 时：被修订过的上报值作为最终样本；未被修订的占位值继续使用估算来冻结展示与 tps。run 累计仍只使用 provider 上报值，估算值不会混入后续消息的累计。
 
 ## 已知限制 / 踩过的坑（别退回去）
 
@@ -67,6 +67,7 @@ token 在流式期间按字符估算（thinking /4、正文 /3.5），provider �
 - 所有宽度计算必须走 `visibleWidth`：Emoji（`⚡🔧🧠⏳`）算 2 列，用 `.length` 会少算。
 - stats 只在 delta 到达时刷新（80ms 节流）。空闲时数值静止是有意的（空闲态显示的就是冻结值）；工作期间边框靠 pi 自身的 `Loader`（每 80ms `ui.requestRender()`）重绘，不需要额外定时器。
 - 原实现的 `renderTopBorder` 在 `width=66` 时只画 65 列（`room = width - labelWidth - 1` 的 off-by-one），本次一并修正；宽度守恒由单测在 1..150 列上守住。
+- **速率是「当前消息」的速率**：EMA 在 `messageStart` 清零、分子与窗口同窗、`message_end` 用整条消息重算。别把 EMA 改成跨消息累积，也别让窗口在 thinking→text 时重置（前者会拖进上一条消息的速率，后者会在分母掉回 100ms 下限时把分子里的 thinking token 放大成尖峰）。
 - 只有 `session_start` 里设置一次编辑器组件；`/reload` 会重新走这条路径，实测改动 `index.ts` 与 `tps.ts` 都能被 `/reload` 拾取。
 - 不要在其他扩展里调 `ctx.ui.setEditorComponent`，会把本扩展顶掉。
 
