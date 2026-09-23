@@ -91,8 +91,10 @@
 - 包裹体（`installThinkingFold`）是**接管式**的：新实例把 native 挂在包裹体上并替换掉上一个实例的包裹体。pi 在 `/reload` 时会新建扩展实例，若沿用「装过就 return」的守卫，之后的渲染会一直用**旧实例的闭包**（其 `entries`/分组表在 `session_shutdown` 里已被清空）⇒ 折叠判定永远拿不到分组，live 与重放的 thinking 都会重新冒出来。
 - 重放历史在 `/reload` 下先建行、后分组：`regroupFromSession()` 算完分组后会 `refoldThinking()`（让已渲染的消息组件再跑一次 `updateContent`），否则那些 `Thinking...` 行会留下来。
 - 挂组是**惰性 + 事件驱动**两条路：`renderCall` 里挂（重建时每行都会走一遍，顺序与转录一致），以及 `RowComponent.render()` 里兜底挂（`/reload` 是**先**建行后发 `session_start`，那时 spec 还没算好）—— 兜底挂上后调一次 `repaint()` 请 pi 再画一帧，让 leader 带上完整成员。
-- **每个文本块只封口一次**（按 `contentIndex` 去重，`format.ts` 的 `shouldSealText`）。`text_start`/`text_delta`/`text_end` 携带的都是**累积**文本，所以「非空就封口」会反复触发；而 `text_end` 到达时 message.content 已经含本消息的 toolCall，pi 又是在扩展处理函数**之前**建行 —— 多封一次就会把本消息自己的工具行关在「只有 1 个成员的已封口组」里，表现为几个调用各自渲染成独立一行（`✓ read: …` / `✓ grep: …`，都没有块头）。
+- **每个文本块只封口一次**（按 `contentIndex` 去重，`format.ts` 的 `shouldSealText`）。`text_start`/`text_delta`/`text_end` 携带的都是**累积**文本，所以「非空就封口」会反复触发。pi 对同一事件先调用扩展 handler、再由 interactive-mode 建工具行；较早事件建出的行可能已加入新组，若后来的 `text_end` 对同一文本块再封一次，就会把本消息的工具行关进单成员组，表现为几个调用各自独立一行。
+- **晚到的可见正文与非内置工具**：封口按消息内容位置拆分已有组，而不只检查当前组。空文本块后面的 toolCall 若已建行入组，后续正文变为非空时只移动该正文之后且仍在排队的调用；较早文本块比后面的文本块晚到、或非内置工具在正文封口后才开始执行，也能拆开已关闭的旧组。纯规则由 `toolCallIdsAfterBoundary` / `partitionQueuedAfterBoundary` 单测覆盖。
 - **入组时机**：`renderCall` 在参数还在流式生成时就会被调用，早于 `tool_execution_start`。用 `agent_start`/`agent_end` 记录 live 状态；live 期间 `renderCall` 见到新的 toolCallId 就立刻加入当前打开的块（没有则新建），所以不会先画成独立一行、执行开始后又塌成 0 行。`pending` / `startedAt` 仍然只由 `tool_execution_start` 设置。
+- **中途自动压缩不结束 live 入组窗口**：`session_compact` 可发生在一个 agent run 的两轮工具调用之间，压缩后仍会继续生成下一条 assistant 消息且不会再发 `agent_start`。重建重放分组时只清当前组，不把 `live` 置为 false；否则下一条工具行先画成独立行，直到 `tool_execution_start` 才突然入组。
 - **三态**：`pending` ⇒ running；`hasResult`（`tool_execution_end`，或非 partial 的 `renderResult` —— 重放行走这条）⇒ ok/failed；两者都没有 ⇒ queued（`○`）。
 - 纯逻辑（时长格式化、摘要、折叠态选取、区间并集、diff 计数、预览头/尾选取、thinking 归属、块头与工具行的按宽度排版）都在 `format.ts`，不依赖 pi 运行时；`index.ts` 只管状态、事件和主题。宽度计算用 pi-tui 的 `visibleWidth` / `truncateToWidth`（字符串带 ANSI、可能有宽字符）。
 

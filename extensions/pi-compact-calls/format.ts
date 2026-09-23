@@ -29,14 +29,39 @@ const MIN_ERROR_TAIL_WIDTH = 12;
  *
  * A text block streams as text_start / text_delta … / text_end, and every one of
  * those events carries the *accumulated* text — so a naive `text.trim() !== ""`
- * check fires over and over. `text_end` is especially dangerous: by then the
- * message content already holds this message's toolCall blocks, and pi's own
- * handler creates those tool rows before extension handlers run, so a second seal
- * closes the block that the message's own tools just joined and strands them as
- * one-tool blocks. Seal at most once per text block.
+ * check fires over and over. Pi dispatches to extensions before its UI creates
+ * rows for the same event, but rows created by an earlier update may already
+ * have joined a group. A second seal would strand those calls as one-tool
+ * blocks. Seal at most once per text block.
  */
 export function shouldSealText(sealed: ReadonlySet<number>, contentIndex: number, text: string): boolean {
 	return text.trim().length > 0 && !sealed.has(contentIndex);
+}
+
+export function toolCallIdsAfterBoundary(
+	content: readonly { type?: string; id?: unknown }[],
+	boundaryIndex: number,
+): Set<string> {
+	return new Set(
+		content.slice(boundaryIndex + 1)
+			.filter((block) => block?.type === "toolCall" && typeof block.id === "string")
+			.map((block) => block.id as string),
+	);
+}
+
+/** Partition one existing group without moving calls that have already run. */
+export function partitionQueuedAfterBoundary<T extends { toolCallId: string }>(
+	tools: readonly T[],
+	afterIds: ReadonlySet<string>,
+	hasRun: (tool: T) => boolean,
+): { before: T[]; after: T[] } {
+	const before: T[] = [];
+	const after: T[] = [];
+	for (const tool of tools) {
+		if (afterIds.has(tool.toolCallId) && !hasRun(tool)) after.push(tool);
+		else before.push(tool);
+	}
+	return { before, after };
 }
 
 /**

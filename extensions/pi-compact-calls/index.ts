@@ -111,12 +111,14 @@ import {
 	formatDuration,
 	headerState,
 	type Paint,
+	partitionQueuedAfterBoundary,
 	pickCollapsedTool,
 	previewModeOf,
 	replayGroups,
 	selectPreview,
 	shouldSealText,
 	summaryOf,
+	toolCallIdsAfterBoundary,
 	toolState,
 	typeBreakdown,
 	unionDuration,
@@ -229,6 +231,8 @@ const sealedTextIndexes = new Set<number>();
  * it never paints as a solo row that vanishes once execution starts.
  */
 let live = false;
+/** Most recent assistant content, needed when a foreign tool starts after message_end. */
+let lastAssistantContent: any[] = [];
 /**
  * Blocks derived from the session's stored messages, keyed by tool call id: the
  * grouping for rows that are replayed instead of streamed. Undefined until a
@@ -245,6 +249,7 @@ function resetState(): void {
 	stopAnimation();
 	entries.clear();
 	sealedTextIndexes.clear();
+	lastAssistantContent = [];
 	currentGroup = null;
 	replaySpec = undefined;
 	live = false;
@@ -261,8 +266,10 @@ function resetState(): void {
 function regroupFromSession(ctx: ExtensionContext): void {
 	stopAnimation();
 	sealedTextIndexes.clear();
+	lastAssistantContent = [];
 	currentGroup = null;
-	live = false;
+	// Auto-compaction can rebuild the transcript between tool turns in the same
+	// agent run. Only agent_end/resetState ends the live grouping window.
 	for (const entry of entries.values()) entry.group = undefined;
 	replaySpec = buildReplaySpec(ctx);
 	// /reload renders the chat (and therefore this thinking) before the grouping above
@@ -308,6 +315,32 @@ function closeGroup(): void {
 	if (currentGroup) {
 		currentGroup.closed = true;
 		currentGroup = null;
+	}
+}
+
+/** Split rendered queued calls at a visible text or foreign-tool boundary. */
+function splitGroupsAtBoundary(content: any[], boundaryIndex: number): void {
+	const afterIds = toolCallIdsAfterBoundary(content, boundaryIndex);
+	const groups = new Set<ToolGroup>();
+	for (const id of afterIds) {
+		const group = entries.get(id)?.group;
+		if (group && !group.replay) groups.add(group);
+	}
+	for (const group of groups) {
+		const { before, after } = partitionQueuedAfterBoundary(group.tools, afterIds, hasRun);
+		if (before.length === 0 || after.length === 0) continue;
+		const wasOpen = group === currentGroup;
+		if (wasOpen) closeGroup();
+		group.tools = before;
+		const next: ToolGroup = { expanded: after[0]!.expanded, closed: !wasOpen, replay: false, tools: [] };
+		for (const tool of after) addToGroup(next, tool);
+		if (wasOpen) currentGroup = next;
+	}
+	// If the open group lies before the boundary, later calls need a new group.
+	// If it lies wholly after it, preserve it (an earlier boundary may already
+	// have separated those calls).
+	if (currentGroup && partitionQueuedAfterBoundary(currentGroup.tools, afterIds, hasRun).after.length === 0) {
+		closeGroup();
 	}
 }
 
@@ -911,7 +944,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", (event) => {
-		if ((event.message as any)?.role === "assistant") sealedTextIndexes.clear();
+		if ((event.message as any)?.role === "assistant") {
+			sealedTextIndexes.clear();
+			lastAssistantContent = [];
+		}
 		// Only a new user turn ends a block. Assistant messages do NOT: within one
 		// turn, every tool call that is not separated by visible prose belongs to the
 		// same block, which the single collapsed line keeps showing live.
@@ -919,23 +955,32 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_update", (event) => {
+		const content = (event.message as any)?.content;
+		if ((event.message as any)?.role === "assistant" && Array.isArray(content)) lastAssistantContent = content;
 		const stream = event.assistantMessageEvent as any;
 		if (!stream || typeof stream.type !== "string" || !stream.type.startsWith("text_")) return;
 		// The first visible assistant text ends the current block, so a later tool
 		// call starts a new one instead of joining the previous group.
-		const content = (event.message as any)?.content;
 		const index = Number(stream.contentIndex);
 		const block = Array.isArray(content) && Number.isInteger(index) ? content[index] : undefined;
 		const text = block?.type === "text" ? String(block.text ?? "") : "";
 		if (!shouldSealText(sealedTextIndexes, index, text)) return;
 		sealedTextIndexes.add(index);
-		closeGroup();
+		if (Array.isArray(content)) splitGroupsAtBoundary(content, index);
+		else closeGroup();
+	});
+
+	pi.on("message_end", (event) => {
+		const message = event.message as any;
+		if (message?.role === "assistant" && Array.isArray(message.content)) lastAssistantContent = message.content;
 	});
 
 	pi.on("tool_execution_start", (event) => {
 		live = true;
 		if (!BUILTIN_TOOL_NAMES.has(event.toolName)) {
-			splitGroupAtForeignTool();
+			const index = lastAssistantContent.findIndex((block: any) => block?.type === "toolCall" && block.id === event.toolCallId);
+			if (index >= 0) splitGroupsAtBoundary(lastAssistantContent, index);
+			else splitGroupAtForeignTool();
 			return;
 		}
 		const entry = ensureEntry(event.toolCallId, event.toolName, event.args);
