@@ -67,6 +67,15 @@ export interface TpsDelta {
 const REFRESH_MS = 80; // throttle for the mid-stream EMA update
 const EMA_WEIGHT = 0.15;
 const MIN_ELAPSED_S = 0.1;
+/**
+ * No mid-stream sample during a message's first 500ms of generation: the first
+ * chunk's tokens were produced before the window opened, so an early sample
+ * measures chunking, not speed (a tiny first chunk reads as ~10t/s and the EMA
+ * then takes a second to climb back). The line keeps the held rate meanwhile,
+ * and the first sample after the warm-up — an average over the whole window —
+ * seeds the EMA.
+ */
+const WARMUP_MS = 500;
 const THINK_CHARS_PER_TOKEN = 4;
 const TEXT_CHARS_PER_TOKEN = 3.5;
 
@@ -319,9 +328,10 @@ export class TpsTracker {
 		return this.working;
 	}
 
-	/** Mid-stream sample: throttled, and blended into the message's own EMA. */
+	/** Mid-stream sample: after the warm-up, throttled, and blended into the message's own EMA. */
 	private refreshTps(now: number, tokens: number): void {
 		if (tokens <= 0) return;
+		if (now - this.generationStart() < WARMUP_MS) return;
 		if (this.lastEmaAt > 0 && now - this.lastEmaAt < REFRESH_MS) return;
 		this.lastEmaAt = now;
 

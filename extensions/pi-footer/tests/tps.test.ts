@@ -99,14 +99,15 @@ test("tracker smooths tps and settles once the window grows", () => {
 	tracker.turnStart();
 	tracker.beforeProviderRequest(T0);
 	tracker.messageStart(T0 + 10);
-	tracker.messageDelta(T0 + 20, { text: 350 });
+	tracker.messageDelta(T0 + 20, { text: 35 });
+	tracker.messageDelta(T0 + 520, { text: 315 });
 
-	const first = tracker.snapshot(T0 + 20)?.tps;
+	const first = tracker.snapshot(T0 + 520)?.tps;
 	assert.ok(typeof first === "number" && first > 0);
 
-	// Same character rate, but one second of extra window: the estimate drops.
-	tracker.messageDelta(T0 + 1_020, { text: 350 });
-	const second = tracker.snapshot(T0 + 1_020)?.tps;
+	// Same character count, but one second of extra window: the estimate drops.
+	tracker.messageDelta(T0 + 1_520, { text: 350 });
+	const second = tracker.snapshot(T0 + 1_520)?.tps;
 	assert.ok(typeof second === "number" && second > 0);
 	assert.ok(second < first, `expected ${second} < ${first}`);
 });
@@ -118,21 +119,19 @@ test("tracker keeps one generation window across thinking and text", () => {
 	tracker.beforeProviderRequest(T0);
 	tracker.messageStart(T0 + 10);
 
-	// 800 thinking characters (200 tokens) over one second: the first sample is
-	// the documented 100ms-floor spike, the second is the plain rate.
-	tracker.messageDelta(T0 + 1_010, { thinking: 400 });
-	assert.equal(tracker.snapshot(T0 + 1_010)?.tps, 1000);
-	tracker.messageDelta(T0 + 2_010, { thinking: 400 });
-	assert.equal(tracker.snapshot(T0 + 2_010)?.tps, 880); // 0.15*200 + 0.85*1000
+	// 800 thinking characters (200 tokens) over the first second.
+	tracker.messageDelta(T0 + 10, { thinking: 4 });
+	tracker.messageDelta(T0 + 1_010, { thinking: 796 });
+	assert.equal(tracker.snapshot(T0 + 1_010)?.tps, 200);
 
-	// Thinking ends: 700 text characters (200 more tokens) arrive two seconds into
+	// Thinking ends: 1400 text characters (400 more tokens) arrive two seconds into
 	// the window. The clock keeps running from the first content, so the numerator
-	// (400 tokens) and the denominator (2s) still cover the same span and the
-	// sample drops to 200 t/s. Restarting the window at the first text delta would
-	// leave all 400 tokens in the numerator against the 0.1s floor: a raw 4000 t/s
-	// and an EMA of 1348 instead of 778.
-	tracker.messageDelta(T0 + 3_010, { text: 700 });
-	assert.equal(tracker.snapshot(T0 + 3_010)?.tps, 778); // 0.15*200 + 0.85*880
+	// (600 tokens) and the denominator (2s) still cover the same span: a 300 t/s
+	// sample. Restarting the window at the first text delta would put all 600
+	// tokens back into the warm-up (no sample, the line stuck on 200) and, once
+	// sampled, against a window that ignores the thinking time.
+	tracker.messageDelta(T0 + 2_010, { text: 1_400 });
+	assert.equal(tracker.snapshot(T0 + 2_010)?.tps, 215); // 0.15*300 + 0.85*200
 });
 
 test("tracker folds a finished message into the run totals and freezes it", () => {
@@ -171,13 +170,15 @@ test("tracker restarts the tps EMA on every message", () => {
 	tracker.messageEnd(T0 + 1_000, { input: 10, output: 100 });
 	assert.equal(tracker.snapshot(T0 + 1_000)?.tps, 1000);
 
-	// Message 2 is ten times slower and its first sample is 10 tokens over the
-	// same floor window. Blending that into the previous message's EMA would carry
-	// 85% of the old rate over (0.15*100 + 0.85*1000 = 865); the line always
-	// describes the current message, so the smoothing starts over here.
+	// Message 2 is ten times slower: 50 tokens over its 0.5s warm-up. Blending
+	// that into the previous message's EMA would carry 85% of the old rate over
+	// (0.15*100 + 0.85*1000 = 865); the line always describes the current message,
+	// so the smoothing starts over here (the old rate is only *held* meanwhile).
 	tracker.messageStart(T0 + 2_000);
 	tracker.messageDelta(T0 + 2_100, { text: 35 });
-	assert.equal(tracker.snapshot(T0 + 2_100)?.tps, 100);
+	assert.equal(tracker.snapshot(T0 + 2_100)?.tps, 1000);
+	tracker.messageDelta(T0 + 2_600, { text: 140 });
+	assert.equal(tracker.snapshot(T0 + 2_600)?.tps, 100);
 });
 
 test("tracker reports tokens/s against upstream's 100ms window floor", () => {
@@ -186,9 +187,11 @@ test("tracker reports tokens/s against upstream's 100ms window floor", () => {
 	tracker.turnStart();
 	tracker.beforeProviderRequest(T0);
 	tracker.messageStart(T0 + 10);
-	// First text delta defines the window start, so elapsed is the floor: 100
-	// characters / 0.1s = 1000 t/s (upstream clamps to 0.1s, not 0.05s).
+	// First text delta defines the window start. A message that ends right there
+	// is rated against the floor: 100 tokens / 0.1s = 1000 t/s (upstream clamps
+	// to 0.1s, not 0.05s). Mid-stream samples never get this close — see WARMUP_MS.
 	tracker.messageDelta(T0 + 20, { text: 350 });
+	tracker.messageEnd(T0 + 20);
 	assert.equal(tracker.snapshot(T0 + 20)?.tps, 1000);
 });
 
@@ -198,7 +201,8 @@ test("tracker finalizes tps with the reported count even right after a delta", (
 	tracker.turnStart();
 	tracker.beforeProviderRequest(T0);
 	tracker.messageStart(T0 + 10);
-	tracker.messageDelta(T0 + 1_000, { text: 350 });
+	tracker.messageDelta(T0 + 500, { text: 35 });
+	tracker.messageDelta(T0 + 1_000, { text: 315 });
 	const mid = tracker.snapshot(T0 + 1_000)?.tps;
 
 	// 10ms later the message ends with a much smaller reported count: the final
@@ -216,13 +220,14 @@ test("tracker uses reported usage for display and tps alike", () => {
 	tracker.beforeProviderRequest(T0);
 	tracker.messageStart(T0 + 10);
 	// 350 characters (≈100 estimated tokens) but the provider reports 40.
-	tracker.messageDelta(T0 + 1_000, { text: 350, usage: { output: 40 } });
+	tracker.messageDelta(T0 + 500, { text: 35 });
+	tracker.messageDelta(T0 + 1_000, { text: 315, usage: { output: 40 } });
 	const s = tracker.snapshot(T0 + 1_000);
 	assert.ok(s);
 	assert.equal(s.outputTokens, 40, "display follows the reported count");
-	// Same numerator for tps: 40 over the 0.1s floor window. Using the estimate
-	// (100 tokens) would give 1000 here.
-	assert.equal(s.tps, 400);
+	// Same numerator for tps: 40 over the 0.5s window. Using the estimate (100
+	// tokens) would give 200 here.
+	assert.equal(s.tps, 80);
 });
 
 test("tracker does not let a stalled reported count pin the estimate", () => {
@@ -233,28 +238,29 @@ test("tracker does not let a stalled reported count pin the estimate", () => {
 	// Anthropic opens the stream with a placeholder output count, and pi hands the
 	// tracker that same unchanged usage object with every delta.
 	tracker.messageStart(T0 + 10, { input: 400, output: 1 });
-	tracker.messageDelta(T0 + 1_010, { text: 350, usage: { input: 400, output: 1 } });
+	tracker.messageDelta(T0 + 10, { text: 35, usage: { input: 400, output: 1 } });
+	tracker.messageDelta(T0 + 1_010, { text: 315, usage: { input: 400, output: 1 } });
 	const first = tracker.snapshot(T0 + 1_010);
 	assert.equal(first?.outputTokens, 100, "the placeholder must not freeze the counter");
-	assert.equal(first?.tps, 1000);
+	assert.equal(first?.tps, 100);
 
 	// Still 1 after another 350 characters: the count stopped advancing, so the
 	// estimate keeps the line moving. A frozen 1 would leave the counter at 1 and
-	// the second sample at 9 t/s.
+	// drag the rate towards zero.
 	tracker.messageDelta(T0 + 2_010, { text: 350, usage: { input: 400, output: 1 } });
 	const stalled = tracker.snapshot(T0 + 2_010);
 	assert.equal(stalled?.outputTokens, 200);
-	assert.equal(stalled?.tps, 880); // 200 tokens over 1s, blended
+	assert.equal(stalled?.tps, 100); // 200 tokens over 2s
 
 	// The trailing revision is the provider's final word for the message: it wins
 	// outright, and because the final sample is recomputed over the whole message
-	// it becomes that message's real rate (250 tokens over 1s) rather than staying
-	// on the 880 t/s mid-stream sample.
+	// it becomes that message's real rate (250 tokens over 2s) rather than staying
+	// on the 100 t/s mid-stream sample.
 	tracker.messageEnd(T0 + 2_010, { input: 400, output: 250 });
 	const done = tracker.snapshot(T0 + 3_000);
 	assert.equal(done?.outputTokens, 250);
 	assert.equal(done?.inputTokens, 400);
-	assert.equal(done?.tps, 250);
+	assert.equal(done?.tps, 125);
 
 	// A placeholder that never gets revised is not a final count either: the frozen
 	// sample falls back to the estimate, while the run totals still take the
@@ -264,11 +270,12 @@ test("tracker does not let a stalled reported count pin the estimate", () => {
 	stuck.turnStart();
 	stuck.beforeProviderRequest(T0);
 	stuck.messageStart(T0 + 10, { input: 400, output: 1 });
-	stuck.messageDelta(T0 + 1_010, { text: 350, usage: { input: 400, output: 1 } });
+	stuck.messageDelta(T0 + 10, { text: 35, usage: { input: 400, output: 1 } });
+	stuck.messageDelta(T0 + 1_010, { text: 315, usage: { input: 400, output: 1 } });
 	stuck.messageDelta(T0 + 2_010, { text: 350, usage: { input: 400, output: 1 } });
 	stuck.messageEnd(T0 + 2_010, { input: 400, output: 1 });
 	const frozen = stuck.snapshot(T0 + 4_000);
-	assert.equal(frozen?.tps, 200); // the estimate, over the whole 1s window
+	assert.equal(frozen?.tps, 100); // the estimate, over the whole 2s window
 	assert.equal(frozen?.outputTokens, 200); // display uses the same estimate as tps
 	assert.equal(frozen?.inputTokens, 400);
 	stuck.messageStart(T0 + 5_000);
@@ -363,8 +370,25 @@ test("tracker keeps the previous message's numbers until the next one has its ow
 	assert.equal(tiny?.ttftMs, 1_100); // TTFT is the new message's as soon as content arrives
 	assert.equal(tiny?.thinkTokens, null); // this message answers without thinking
 
-	tracker.messageDelta(T0 + 4_200, { text: 68 });
-	assert.equal(tracker.snapshot(T0 + 4_200)?.tps, 200); // 20 tokens over 0.1s
+	// Still inside the 500ms warm-up: an early sample would read ~10t/s here.
+	tracker.messageDelta(T0 + 4_300, { text: 33 });
+	assert.equal(tracker.snapshot(T0 + 4_300)?.tps, 150);
+
+	// Warm-up over: the first sample is the average of the whole window.
+	tracker.messageDelta(T0 + 4_600, { text: 140 });
+	assert.equal(tracker.snapshot(T0 + 4_600)?.tps, 100); // 50 tokens over 0.5s
+});
+
+test("tracker waits out the warm-up before a run's first rate", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.messageStart(T0);
+	tracker.messageDelta(T0 + 100, { text: 350 });
+	tracker.messageDelta(T0 + 400, { text: 350 });
+	assert.equal(tracker.snapshot(T0 + 400)?.tps, null); // nothing to hold yet: ⚡…
+	tracker.messageDelta(T0 + 600, { text: 350 });
+	assert.equal(tracker.snapshot(T0 + 600)?.tps, 600); // 300 tokens over 0.5s
 });
 
 test("tracker holds the rate across a message that produced nothing", () => {
