@@ -159,26 +159,47 @@ test("tracker folds a finished message into the run totals and freezes it", () =
 	assert.equal(second.outputTokens, 140); // 120 + 20
 });
 
-test("tracker restarts the tps EMA on every message", () => {
+test("tracker lets every message converge to its own rate", () => {
 	const tracker = new TpsTracker();
 	tracker.agentStart();
 	tracker.turnStart();
-	tracker.beforeProviderRequest(T0);
-	// Message 1 runs fast: 100 estimated tokens over the 0.1s window floor.
-	tracker.messageStart(T0 + 10);
-	tracker.messageDelta(T0 + 1_000, { text: 350 });
-	tracker.messageEnd(T0 + 1_000, { input: 10, output: 100 });
-	assert.equal(tracker.snapshot(T0 + 1_000)?.tps, 1000);
+	// Message 1 runs at 1000 t/s: 100 estimated tokens every 100ms for 2s.
+	tracker.messageStart(T0);
+	for (let dt = 0; dt <= 2_000; dt += 100) tracker.messageDelta(T0 + 500 + dt, { text: 350 });
+	tracker.messageEnd(T0 + 2_500);
+	assert.equal(tracker.snapshot(T0 + 2_500)?.tps, 1050);
 
-	// Message 2 is ten times slower: 50 tokens over its 0.5s warm-up. Blending
-	// that into the previous message's EMA would carry 85% of the old rate over
-	// (0.15*100 + 0.85*1000 = 865); the line always describes the current message,
-	// so the smoothing starts over here (the old rate is only *held* meanwhile).
-	tracker.messageStart(T0 + 2_000);
-	tracker.messageDelta(T0 + 2_100, { text: 35 });
-	assert.equal(tracker.snapshot(T0 + 2_100)?.tps, 1000);
-	tracker.messageDelta(T0 + 2_600, { text: 140 });
-	assert.equal(tracker.snapshot(T0 + 2_600)?.tps, 100);
+	// Message 2 is ten times slower. Its warm-up starts from message 1's last
+	// second (so the line does not jump), then the old second's weight fades and
+	// the EMA runs on message 2's own window only.
+	tracker.messageStart(T0 + 60_000);
+	const start = T0 + 61_000;
+	tracker.messageDelta(start, { text: 35 });
+	assert.equal(tracker.snapshot(start)?.tps, 1010); // (10 + 1000) / (0 + 1s)
+	for (let dt = 100; dt <= 2_500; dt += 100) tracker.messageDelta(start + dt, { text: 35 });
+	assert.equal(tracker.snapshot(start + 2_500)?.tps, 127);
+
+	// The frozen value is message 2's alone: 260 tokens over 2.5s.
+	tracker.messageEnd(start + 2_500);
+	assert.equal(tracker.snapshot(start + 2_500)?.tps, 104);
+});
+
+test("tracker borrows only the generation of a short previous message", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	// 100 estimated tokens in 0.2s, but the provider reports 50 in the end.
+	tracker.messageStart(T0);
+	tracker.messageDelta(T0 + 100, { text: 350 });
+	tracker.messageEnd(T0 + 300, { input: 10, output: 50 });
+	assert.equal(tracker.snapshot(T0 + 300)?.tps, 250);
+
+	// The tail is the whole 0.2s window (not a second that reaches back into the
+	// prefill) and counts 50 tokens (scaled to the reported count), so the warm-up
+	// starts next to the frozen 250. A flat 1s tail would read 52 here.
+	tracker.messageStart(T0 + 1_000);
+	tracker.messageDelta(T0 + 2_000, { text: 7 });
+	assert.equal(tracker.snapshot(T0 + 2_000)?.tps, 260); // (2 + 50) / (0 + 0.2s)
 });
 
 test("tracker reports tokens/s against upstream's 100ms window floor", () => {
@@ -363,20 +384,22 @@ test("tracker keeps the previous message's numbers until the next one has its ow
 	assert.equal(prefill?.llmDurationMs, 1_000); // the clock is the new request's
 	assert.equal(buildStatsLine(prefill!, { showTtft: true, maxWidth: 80, color: plain }).startsWith("⚡150t/s"), true);
 
-	// A first delta too short to estimate a token still keeps the old rate.
+	// A first delta too short to estimate a token reads as the previous message's
+	// tail: its whole 0.8s window here, 120 tokens.
 	tracker.messageDelta(T0 + 4_100, { text: 2 });
 	const tiny = tracker.snapshot(T0 + 4_100);
 	assert.equal(tiny?.tps, 150);
 	assert.equal(tiny?.ttftMs, 1_100); // TTFT is the new message's as soon as content arrives
 	assert.equal(tiny?.thinkTokens, null); // this message answers without thinking
 
-	// Still inside the 500ms warm-up: an early sample would read ~10t/s here.
+	// Still inside the 500ms warm-up: the window is extended by that tail. On its
+	// own it would read ~10t/s — or 50 with the old 0.2s spent.
 	tracker.messageDelta(T0 + 4_300, { text: 33 });
-	assert.equal(tracker.snapshot(T0 + 4_300)?.tps, 150);
+	assert.equal(tracker.snapshot(T0 + 4_300)?.tps, 130); // (10 + 120) / (0.2s + 0.8s)
 
-	// Warm-up over: the first sample is the average of the whole window.
-	tracker.messageDelta(T0 + 4_600, { text: 140 });
-	assert.equal(tracker.snapshot(T0 + 4_600)?.tps, 100); // 50 tokens over 0.5s
+	// Warm-up over: the message's own window feeds the EMA the warm-up seeded.
+	tracker.messageDelta(T0 + 4_600, { text: 112 });
+	assert.equal(tracker.snapshot(T0 + 4_600)?.tps, 123); // 0.15*84 + 0.85*130
 });
 
 test("tracker waits out the warm-up before a run's first rate", () => {

@@ -68,14 +68,22 @@ const REFRESH_MS = 80; // throttle for the mid-stream EMA update
 const EMA_WEIGHT = 0.15;
 const MIN_ELAPSED_S = 0.1;
 /**
- * No mid-stream sample during a message's first 500ms of generation: the first
- * chunk's tokens were produced before the window opened, so an early sample
- * measures chunking, not speed (a tiny first chunk reads as ~10t/s and the EMA
- * then takes a second to climb back). The line keeps the held rate meanwhile,
- * and the first sample after the warm-up — an average over the whole window —
- * seeds the EMA.
+ * A message's first 500ms of generation are too short to rate on their own: the
+ * first chunk's tokens were produced before the window opened, so an early
+ * sample measures chunking, not speed (a tiny first chunk reads as ~10t/s and
+ * the EMA then takes a second to climb back). During the warm-up the window is
+ * therefore extended backwards by the previous message's tail (see `TAIL_MS`):
+ *
+ *   tps = (tokens + tailTokens) / (elapsed + tailDuration)
+ *
+ * which starts at the previous rate and moves towards the new one with every
+ * token. The last warm-up value seeds the EMA. A run's first message has no
+ * tail: it shows nothing until the warm-up is over, then seeds the EMA with the
+ * average over its whole window.
  */
 const WARMUP_MS = 500;
+/** How much of the previous message's generation the warm-up borrows. */
+const TAIL_MS = 1_000;
 const THINK_CHARS_PER_TOKEN = 4;
 const TEXT_CHARS_PER_TOKEN = 3.5;
 
@@ -89,7 +97,9 @@ const TEXT_CHARS_PER_TOKEN = 3.5;
  * The TPS line always describes *one* message's generation rate:
  *
  *  - the EMA starts over at every `messageStart`, so a slow message is not
- *    dragged down by the fast one before it (and vice versa);
+ *    dragged down by the fast one before it (and vice versa); only the warm-up
+ *    borrows the previous message's last second, and its weight fades as the
+ *    new message streams;
  *  - numerator and window cover the same span — content accumulates and the
  *    clock starts at `firstContentTime`, so ending thinking does not reset the
  *    denominator while the thinking tokens stay in the numerator;
@@ -125,6 +135,10 @@ export class TpsTracker {
 	private usageAnchorChars = 0;
 	private lastEmaAt = 0;
 	private smoothedTps = 0;
+	/** Estimated cumulative tokens at the live message's recent deltas (≥ TAIL_MS back). */
+	private recent: { at: number; tokens: number }[] = [];
+	/** The last `TAIL_MS` of the previous message with content, for the warm-up. */
+	private tail: { tokens: number; ms: number } | null = null;
 	/** Previous message's numbers, shown until the current message replaces them. */
 	private heldTps: number | null = null;
 	private heldTtftMs: number | null = null;
@@ -156,6 +170,8 @@ export class TpsTracker {
 		this.usageAnchorChars = 0;
 		this.lastEmaAt = 0;
 		this.smoothedTps = 0;
+		this.recent = [];
+		this.tail = null;
 		this.heldTps = null;
 		this.heldTtftMs = null;
 		this.heldThinkTokens = null;
@@ -209,6 +225,8 @@ export class TpsTracker {
 		// leak into it (a single 0.15-weighted sample would carry ~85% of it over).
 		// The old rate stays *visible* through `heldTps` until the first sample.
 		this.smoothedTps = 0;
+		// `tail` is kept: it belongs to the last message that produced content.
+		this.recent = [];
 	}
 
 	messageDelta(now: number, delta: TpsDelta): void {
@@ -231,6 +249,7 @@ export class TpsTracker {
 		// First content (text, thinking or tool-call arguments) marks TTFT and starts
 		// the TPS window.
 		if (this.firstContentTime === 0 && hasContent) this.firstContentTime = now;
+		if (this.firstContentTime > 0) this.recordRecent(now);
 
 		this.refreshTps(now, this.outputTokensNow());
 	}
@@ -263,6 +282,7 @@ export class TpsTracker {
 		// weight 0.15, which would leave the frozen line on the last mid-stream
 		// sample even though the exact count just arrived.
 		this.finalizeTps(now, displayOutput);
+		this.tail = this.measureTail(now, displayOutput) ?? this.tail;
 
 		this.totalInput += Math.max(usage?.input ?? 0, this.msgStartInputTokens);
 		this.totalOutput += reportedOutput;
@@ -328,12 +348,24 @@ export class TpsTracker {
 		return this.working;
 	}
 
-	/** Mid-stream sample: after the warm-up, throttled, and blended into the message's own EMA. */
+	/**
+	 * Mid-stream sample, throttled. During the warm-up it is the window extended
+	 * by the previous message's tail (or nothing without one); afterwards it is
+	 * blended into the message's own EMA.
+	 */
 	private refreshTps(now: number, tokens: number): void {
-		if (tokens <= 0) return;
-		if (now - this.generationStart() < WARMUP_MS) return;
+		if (this.firstContentTime === 0) return;
+		const sinceStart = now - this.firstContentTime;
+		const warming = sinceStart < WARMUP_MS;
+		// With a tail, even a first chunk too short for one token has a rate.
+		if (warming ? !this.tail : tokens <= 0) return;
 		if (this.lastEmaAt > 0 && now - this.lastEmaAt < REFRESH_MS) return;
 		this.lastEmaAt = now;
+
+		if (warming && this.tail) {
+			this.smoothedTps = ((tokens + this.tail.tokens) * 1000) / (sinceStart + this.tail.ms);
+			return;
+		}
 
 		const raw = tokens / this.elapsedSeconds(now);
 		this.smoothedTps = this.smoothedTps === 0 ? raw : EMA_WEIGHT * raw + (1 - EMA_WEIGHT) * this.smoothedTps;
@@ -370,6 +402,41 @@ export class TpsTracker {
 		const reported = this.liveUsageOutput;
 		const current = reported > 0 && this.usageAnchorChars === this.streamedChars();
 		return current ? reported : this.estimateOutputTokens();
+	}
+
+	/** Remember the estimate at this delta, dropping samples older than the tail needs. */
+	private recordRecent(now: number): void {
+		this.recent.push({ at: now, tokens: this.estimateOutputTokens() });
+		this.pruneRecent(now - TAIL_MS);
+	}
+
+	/** Keep one sample at or before `cutoff` as the tail's baseline. */
+	private pruneRecent(cutoff: number): void {
+		while (this.recent.length >= 2 && this.recent[1].at <= cutoff) this.recent.shift();
+	}
+
+	/**
+	 * The message's last `TAIL_MS` of generation, or its whole window when it was
+	 * shorter (the prefill before the first token is not generation time). Tokens
+	 * are counted by the estimate and scaled to `finalTokens`, so the tail's rate
+	 * is in the same unit as the frozen line even when the provider reported the
+	 * final count. Null when the tail has no tokens: a rate of 0 would pull the
+	 * next warm-up down, which is exactly what the warm-up is there to avoid.
+	 */
+	private measureTail(end: number, finalTokens: number): { tokens: number; ms: number } | null {
+		const estimated = this.estimateOutputTokens();
+		if (this.firstContentTime === 0 || estimated <= 0 || finalTokens <= 0) return null;
+
+		const cutoff = end - TAIL_MS;
+		this.pruneRecent(cutoff);
+		const base = this.recent[0];
+		const whole = !base || base.at > cutoff;
+		const tailEstimated = whole ? estimated : estimated - base.tokens;
+		if (tailEstimated <= 0) return null;
+		return {
+			tokens: (tailEstimated * finalTokens) / estimated,
+			ms: whole ? Math.max(end - this.firstContentTime, MIN_ELAPSED_S * 1000) : TAIL_MS,
+		};
 	}
 
 	private streamedChars(): number {
