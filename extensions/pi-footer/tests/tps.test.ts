@@ -331,6 +331,91 @@ test("tracker drops thinking tokens when the next message has none", () => {
 	assert.equal(tracker.snapshot(T0 + 250)?.thinkTokens, null);
 });
 
+test("tracker keeps the previous message's numbers until the next one has its own", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.beforeProviderRequest(T0);
+	tracker.messageStart(T0 + 10);
+	tracker.messageDelta(T0 + 200, { thinking: 80 });
+	tracker.messageDelta(T0 + 1_000, { text: 350 });
+	tracker.messageEnd(T0 + 1_000, { input: 10, output: 120 });
+	tracker.toolStart();
+	const first = tracker.snapshot(T0 + 1_000);
+	assert.equal(first?.tps, 150); // 120 tokens over the 0.8s since the first delta
+	assert.equal(first?.ttftMs, 200);
+	assert.equal(first?.thinkTokens, 20);
+
+	// Tool ran, the next request is in prefill: nothing new yet, the line holds.
+	tracker.beforeProviderRequest(T0 + 3_000);
+	tracker.messageStart(T0 + 3_100);
+	const prefill = tracker.snapshot(T0 + 4_000);
+	assert.equal(prefill?.tps, 150);
+	assert.equal(prefill?.ttftMs, 200);
+	assert.equal(prefill?.thinkTokens, 20);
+	assert.equal(prefill?.llmDurationMs, 1_000); // the clock is the new request's
+	assert.equal(buildStatsLine(prefill!, { showTtft: true, maxWidth: 80, color: plain }).startsWith("⚡150t/s"), true);
+
+	// A first delta too short to estimate a token still keeps the old rate.
+	tracker.messageDelta(T0 + 4_100, { text: 2 });
+	const tiny = tracker.snapshot(T0 + 4_100);
+	assert.equal(tiny?.tps, 150);
+	assert.equal(tiny?.ttftMs, 1_100); // TTFT is the new message's as soon as content arrives
+	assert.equal(tiny?.thinkTokens, null); // this message answers without thinking
+
+	tracker.messageDelta(T0 + 4_200, { text: 68 });
+	assert.equal(tracker.snapshot(T0 + 4_200)?.tps, 200); // 20 tokens over 0.1s
+});
+
+test("tracker holds the rate across a message that produced nothing", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.messageStart(T0);
+	tracker.messageDelta(T0 + 100, { text: 350 });
+	tracker.messageEnd(T0 + 1_100, { input: 10, output: 100 });
+
+	tracker.messageStart(T0 + 2_000);
+	tracker.messageEnd(T0 + 2_500); // aborted before any content
+	tracker.messageStart(T0 + 3_000);
+	assert.equal(tracker.snapshot(T0 + 3_000)?.tps, 100);
+});
+
+test("tracker counts streamed tool-call arguments as generated tokens", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.beforeProviderRequest(T0);
+	tracker.messageStart(T0 + 10);
+	tracker.messageDelta(T0 + 500, { toolCall: 35 });
+	assert.equal(tracker.snapshot(T0 + 500)?.ttftMs, 500);
+	tracker.messageDelta(T0 + 1_500, { toolCall: 350 });
+	const live = tracker.snapshot(T0 + 1_500);
+	assert.notEqual(live?.tps, null);
+	assert.equal(live?.outputTokens, 110); // 385 chars / 3.5
+
+	tracker.messageEnd(T0 + 1_500, { input: 10, output: 100 });
+	assert.equal(tracker.snapshot(T0 + 1_500)?.tps, 100); // 100 tokens over 1s since the first delta
+});
+
+test("tracker starts every agent run without held numbers", () => {
+	const tracker = new TpsTracker();
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.messageStart(T0);
+	tracker.messageDelta(T0 + 100, { thinking: 80, text: 350 });
+	tracker.messageEnd(T0 + 1_100, { input: 10, output: 120 });
+	tracker.agentEnd();
+
+	tracker.agentStart();
+	tracker.turnStart();
+	tracker.messageStart(T0 + 5_000);
+	const fresh = tracker.snapshot(T0 + 5_000);
+	assert.equal(fresh?.tps, null);
+	assert.equal(fresh?.ttftMs, null);
+	assert.equal(fresh?.thinkTokens, null);
+});
+
 // ── stats line ───────────────────────────────────────────────────────────
 
 const FULL_LINE = "⚡42t/s 🔧3 ⏱1.2s 🧠12 ⏳2.1s";

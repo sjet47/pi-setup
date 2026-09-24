@@ -54,6 +54,8 @@ export interface TpsDelta {
 	text?: number;
 	/** Characters of thinking received. */
 	thinking?: number;
+	/** Characters of tool-call arguments (JSON) received. */
+	toolCall?: number;
 	/** Set when the message carries thinking content without deltas. */
 	hasThinkingContent?: boolean;
 	usage?: TpsUsage;
@@ -85,7 +87,10 @@ const TEXT_CHARS_PER_TOKEN = 3.5;
  *  - the numerator prefers reported usage while it is *current* and falls back
  *    to the character estimate otherwise (see `outputTokensNow`);
  *  - `messageEnd` recomputes the rate over the whole message window and lets it
- *    replace the EMA, so the frozen line ends up near the message's real rate.
+ *    replace the EMA, so the frozen line ends up near the message's real rate;
+ *  - until the new message has numbers of its own, the line keeps showing the
+ *    previous message's TPS / TTFT / thinking (see `held*`), so a turn never
+ *    blanks back to the `⚡…` placeholder between two messages.
  */
 export class TpsTracker {
 	private working = false;
@@ -106,10 +111,15 @@ export class TpsTracker {
 	private firstContentTime = 0;
 	private streamedTextLen = 0;
 	private streamedThinkLen = 0;
+	private streamedToolCallLen = 0;
 	/** Content chars streamed when the reported output count was last revised. */
 	private usageAnchorChars = 0;
 	private lastEmaAt = 0;
 	private smoothedTps = 0;
+	/** Previous message's numbers, shown until the current message replaces them. */
+	private heldTps: number | null = null;
+	private heldTtftMs: number | null = null;
+	private heldThinkTokens: number | null = null;
 
 	private totalInput = 0;
 	private totalOutput = 0;
@@ -133,9 +143,13 @@ export class TpsTracker {
 		this.firstContentTime = 0;
 		this.streamedTextLen = 0;
 		this.streamedThinkLen = 0;
+		this.streamedToolCallLen = 0;
 		this.usageAnchorChars = 0;
 		this.lastEmaAt = 0;
 		this.smoothedTps = 0;
+		this.heldTps = null;
+		this.heldTtftMs = null;
+		this.heldThinkTokens = null;
 		this.totalInput = 0;
 		this.totalOutput = 0;
 		this.toolCount = 0;
@@ -156,6 +170,14 @@ export class TpsTracker {
 	}
 
 	messageStart(now: number, usage?: TpsUsage): void {
+		// Carry what the line shows right now over to the new message; `snapshot`
+		// already folds in older held values, so a message that produced nothing
+		// keeps the one before it on screen.
+		const shown = this.snapshot(now);
+		this.heldTps = shown?.tps ?? null;
+		this.heldTtftMs = shown?.ttftMs ?? null;
+		this.heldThinkTokens = shown?.thinkTokens ?? null;
+
 		this.hasRun = true;
 		this.messageLive = true;
 		this.msgStartTime = now;
@@ -169,18 +191,21 @@ export class TpsTracker {
 		this.firstContentTime = 0;
 		this.streamedTextLen = 0;
 		this.streamedThinkLen = 0;
+		this.streamedToolCallLen = 0;
 		// Nothing streamed yet, so a count coming from `message_start` is current
 		// until the first content delta arrives.
 		this.usageAnchorChars = 0;
 		this.lastEmaAt = 0;
-		// The line shows this message's rate: the previous message's EMA must not
+		// The EMA describes this message only: the previous message's rate must not
 		// leak into it (a single 0.15-weighted sample would carry ~85% of it over).
+		// The old rate stays *visible* through `heldTps` until the first sample.
 		this.smoothedTps = 0;
 	}
 
 	messageDelta(now: number, delta: TpsDelta): void {
 		if (delta.text) this.streamedTextLen += delta.text;
 		if (delta.thinking) this.streamedThinkLen += delta.thinking;
+		if (delta.toolCall) this.streamedToolCallLen += delta.toolCall;
 		if (delta.usage) {
 			if (delta.usage.input !== undefined) this.liveUsageInput = delta.usage.input;
 			const output = delta.usage.output;
@@ -193,9 +218,9 @@ export class TpsTracker {
 			}
 		}
 
-		const hasContent =
-			this.streamedTextLen > 0 || this.streamedThinkLen > 0 || (delta.hasThinkingContent ?? false);
-		// First content (text or thinking) marks TTFT and starts the TPS window.
+		const hasContent = this.streamedChars() > 0 || (delta.hasThinkingContent ?? false);
+		// First content (text, thinking or tool-call arguments) marks TTFT and starts
+		// the TPS window.
 		if (this.firstContentTime === 0 && hasContent) this.firstContentTime = now;
 
 		this.refreshTps(now, this.outputTokensNow());
@@ -261,18 +286,31 @@ export class TpsTracker {
 
 		const base = this.msgRequestSentTime > 0 ? this.msgRequestSentTime : this.msgStartTime;
 		const end = live ? now : this.msgEndTime;
-		const ttftMs = this.firstContentTime > 0 && base > 0 ? Math.max(this.firstContentTime - base, 0) : null;
+		const ttftMs =
+			this.firstContentTime === 0
+				? this.heldTtftMs
+				: base > 0
+					? Math.max(this.firstContentTime - base, 0)
+					: null;
 		const llmDurationMs = base > 0 ? Math.max(end - base, 0) : null;
-		const thinkTokens = Math.floor(this.streamedThinkLen / THINK_CHARS_PER_TOKEN);
+		const ownThink = Math.floor(this.streamedThinkLen / THINK_CHARS_PER_TOKEN);
+		// Thinking of the previous message stays until this one either thinks too or
+		// moves on to text / tool calls without thinking (then there is none to show).
+		const thinkTokens =
+			ownThink > 0
+				? ownThink
+				: this.streamedTextLen + this.streamedToolCallLen > 0
+					? null
+					: this.heldThinkTokens;
 
 		return {
-			tps: this.smoothedTps > 0 ? Math.round(this.smoothedTps) : null,
+			tps: this.smoothedTps > 0 ? Math.round(this.smoothedTps) : this.heldTps,
 			inputTokens,
 			inputKnown: inputTokens > 0,
 			outputTokens,
 			toolCount: this.toolCount,
 			ttftMs,
-			thinkTokens: thinkTokens > 0 ? thinkTokens : null,
+			thinkTokens,
 			llmDurationMs,
 		};
 	}
@@ -325,7 +363,7 @@ export class TpsTracker {
 	}
 
 	private streamedChars(): number {
-		return this.streamedTextLen + this.streamedThinkLen;
+		return this.streamedTextLen + this.streamedThinkLen + this.streamedToolCallLen;
 	}
 
 	/**
@@ -345,7 +383,7 @@ export class TpsTracker {
 	private estimateOutputTokens(): number {
 		return (
 			Math.floor(this.streamedThinkLen / THINK_CHARS_PER_TOKEN) +
-			Math.floor(this.streamedTextLen / TEXT_CHARS_PER_TOKEN)
+			Math.floor((this.streamedTextLen + this.streamedToolCallLen) / TEXT_CHARS_PER_TOKEN)
 		);
 	}
 }
