@@ -83,7 +83,7 @@
 
 - **不 patch 其他任何 prototype**。分块靠「leader 行」：每组第一个工具行渲染整块，其他成员渲染 0 行。唯一例外是 thinking：pi 没有 per-message 钩子（`registerMessageRenderer` 只管 custom 消息；markdown transformer 只在 thinking 可见时跑），所以 `installThinkingFold()` 包裹了从包根导出的 `AssistantMessageComponent.prototype.updateContent`（详见下方「thinking 怎么折」）。
 - 0 行必须配合 `renderShell: "self"`：默认 shell 下即使内容为空，`ToolExecutionComponent` 自带的 `Spacer(1)` 仍会留下一个空行。
-- 工具定义用 `{ ...createXTool(cwd), renderShell: "self", renderCall, renderResult }` 注册，因此 **description / promptSnippet / promptGuidelines / constrainedSampling 和原生 execute 全部保留**，只替换渲染。（对照：pi-compact-ui 手写定义，把描述退化成 `Built-in bash (rendering handled by compact-ui group)`，并丢掉 0.86.1 的 strict JSON-schema 采样。）
+- 工具渲染走 **`pi.registerToolRenderer()`**：内置工具的**定义完全不动**（description / promptSnippet / promptGuidelines / constrainedSampling 与原生 execute 都还是 pi 自己那份），扩展只在 resolver 里给出 `{ renderShell: "self", renderCall, renderResult }`。因此 active set 也只是 `defaultTools` / `--tools` 的事，`-ls` 照样能关掉 `ls`（早先靠「重注册 + `defaultActive: false` + 转发 execute」模拟，已删）。resolver 只在**注册表里那份路径恰好是 `builtin:<name>`**（pi 内置定义的注册方式）时才接管，名字被别的扩展覆盖时 `next()` 让原 renderer 留任（MCP 工具即使叫 `read`，路径也是 `builtin:mcp`，不会被劫走）。（对照：pi-compact-ui 手写定义重注册，把描述退化成 `Built-in bash (rendering handled by compact-ui group)`，并丢掉 0.86.1 的 strict JSON-schema 采样。）
 - pi 每帧全量重渲染整棵树、不做 dirty 跳过，所以 leader 会自动带上后加入的工具；重绘由 pi 自己的工具事件 + 我们的 spinner 定时器（100ms）驱动，定时器复用 `context.invalidate()`（内部已调 `ui.requestRender()`），因此**不需要通过 widget 去偷 TUI 实例**。
 - 分块边界：`message_start(user)`（新的一轮 ⇒ 新块）、`tool_execution_start` 里非内置工具名（⇒ 在该处拆块）、出现可见正文（`text_*` 事件且对应块非空 ⇒ 断块）；`agent_end` 也封口。assistant 消息边界**不**断开。
 - **重放分组**（`/reload`、`-c`、`/tree`、压缩后）：重放行没有任何 `tool_execution_*` 事件，所以分组不用事件推，而是把会话消息再折一遍——`ctx.sessionManager.buildContextEntries()` → `sessionEntryToContextMessages` → 纯函数 `replayGroups`（`tests/replay.test.ts`）得到「哪些 toolCallId 同块 + 转录顺序」，`renderCall` 按 id 挂组（幂等）。`session_start` / `session_tree` / `session_compact` 时 `regroupFromSession()` 重算它并清掉所有行的组。
@@ -131,7 +131,8 @@ node --test tests/*.test.ts
 - 重放分组由会话消息离线算出（`format.ts` 的 `replayGroups`）：只在「正文 / 新用户消息 / 非内置工具」处断开（与 live 同规则），不重建 live 当时的排队细节（反正都执行完了）。分组在 `session_start` / `session_tree` / `session_compact` 重算；`/reload` 是「先恢复 chat 再发 `session_start`」，所以那次的分组是事后补的（见「实现要点」）。
 - 重放组记录自己的 `order`（转录里的 id 顺序）：行加入组的顺序并不保证（一次 repaint 可能先把最后一行弄成 leader），leader 必须按转录顺序定。
 - 块上**点击**展开依赖该行的 result 已经存在（pi 的 `createResultRegion` 先判 `this.result`），所以第一个工具还在跑时点击无效；`Ctrl+O` 任何时候都好用。
-- 非内置工具不参与分块（我们只能控制自己注册的工具行）。
+- 非内置工具不参与分块。`registerToolRenderer` 对任意工具名都生效，技术上可以把 subagent / MCP 的行也接管过来，但那要把人家的 renderer 嵌进我们的块里渲染，本期没做；这些名字 `next()` 原样放行。`powershell`（第 8 个内置工具）同样不在名单里，于是它在自己的位置断块。
+- 需要 **pi ≥ 1.0.1**（`pi.registerToolRenderer` 的引入版本）；仓库 `devDependencies` 已跟到 `^1.0.0`。
 - 每个块前面都有一个 pi 强制的空行：`ToolExecutionComponent.render()` 在 `renderShell: "self"` 下硬编码 `lines.push("")`（仅内容非空时），扩展内去不掉；所以块与上面的正文/上一块之间总隔一个空行。
 - **thinking 的吸收范围**：一条消息里，只要后面跟着一个会被折叠的工具调用，它前面的 thinking run 就被拿走——**中间隔着正文也算**（正文与块属于同一步）。保留原生 `Thinking...` 行的只有：尾部 run（后面没有工具调用，通常就是最终回答前的思考）与「后面只跟非内置工具（subagent/MCP）」的 run。live 与重放（含 `/reload`、`/tree`）行为一致。
 - 流式阶段 thinking 行会先出现再被吸走：工具行是在消息更新之后的 renderCall 里建的，所以参数还在流式生成时可能先看到 `Thinking...`，最晚到 `message_end` 被吸收。
@@ -144,6 +145,16 @@ node --test tests/*.test.ts
 - `Ctrl+O to expand` 是写死的文案，不跟随 `app.tools.expand` 的改键。
 - 主题从 renderer 参数里取最新值（pi 没有主题切换事件），切换主题后需等一次重绘才刷新。
 - 未实现 pi-compact-ui 的 `worked for Xs` 分隔线、compaction 行紧凑化、代码围栏面板美化 —— 这些要么需要额外 patch，要么与折叠无关。
+
+## 验证记录（2026-10-05 第十轮，改用 `registerToolRenderer`，pi 1.0.3）
+
+pi 1.0.1 新增 `pi.registerToolRenderer((toolName, next) => renderers)`（对未注册的工具、MCP、重放行同样生效），把「重注册 7 个内置工具以换渲染器」那套脏手脚换掉：删除 `pi.registerTool` 循环、`nativeTools(cwd)` 缓存、`execute` 转发、`defaultActive: false`，以及 7 个 `createXTool` 导入；新增 `renderersFor(name)` 工厂 + 一个 resolver。resolver 只在 `pi.getAllTools()` 里那份定义的 `sourceInfo.path` 恰好是 `builtin:<name>` 时接管（不能用 `sourceInfo.source === "builtin"`：内置 mcp 扩展注册的 MCP 工具来源也是 builtin），`getAllTools()` 不可用（注册表未就绪）或该名字根本没注册（`--tools` 排除、历史重放）时也按内置处理 —— 与改造前行为一致；被别的扩展覆盖的名字 `next()` 放行。
+
+核对过 pi 1.0.3 的三条建行路径都走 resolver（`interactive-mode.js` 的流式 / `tool_execution_start` / 重放，以及 `agent-session.js` 的 HTML 导出），所以分组、leader/0 行、重放、thinking 折叠一行未改。
+
+`devDependencies` 的 4 个 `@earendil-works/*` 从 `^0.85.0` 升到 `^1.0.0`：仓库本地原先装的是 0.85.0 类型，没有这个 API，`npm run typecheck` 会报 5 个「没有 `registerToolRenderer` / `ToolRenderers`」的错。升级前先在临时 tsconfig 里把类型指向 1.0.3 实测过：全仓报错数与升级前完全一致（pi-execution-time 5 + pi-shots 2 个既有报错），零新增。
+
+验证：本扩展单测 `node --test tests/*.test.ts` 42 项全过（纯逻辑未动）；`npm run typecheck` 只剩那 7 个既有报错；`npm test`（wakatime / cache-graph / wordle / note / recap / footer）全过，`better-sqlite3` 重装后可加载。本轮是渲染器挂载方式的改动，未做 tmux 抓屏：分组行为由「逻辑一行未改 + 单测」守住，界面由用户 `/reload` 确认。
 
 ## 验证记录（2026-09-22 第九轮，块头去掉成败状态）
 

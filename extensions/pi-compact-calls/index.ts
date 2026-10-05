@@ -38,11 +38,14 @@
  *
  * Design notes:
  *
- * - The 7 built-in tools are re-registered as `{ ...native, renderShell: "self",
- *   renderCall, renderResult }`. Spreading the native definition keeps
- *   description / promptSnippet / promptGuidelines / constrainedSampling and the
- *   native execute implementation — only presentation changes. (pi-compact-ui
- *   rebuilt the definition by hand and silently dropped all of that.)
+ * - The 7 built-in tools are drawn by `pi.registerToolRenderer()`: pi keeps its own
+ *   tool definitions (description / promptSnippet / promptGuidelines, constrained
+ *   sampling, native execute) and this extension only supplies renderers for them.
+ *   That also leaves the active set entirely to `defaultTools` / `--tools`, so
+ *   `-ls` still disables `ls`. The resolver only takes over while pi's own
+ *   definition is the registered one — a name another extension shadowed keeps
+ *   its own renderers. (pi-compact-ui re-registered hand-built definitions and
+ *   silently dropped all of that metadata.)
  *
  * - A block = one run of consecutive tool calls (parallel batches and multi-step
  *   batches alike), ended by visible assistant text, a new user turn, or a tool
@@ -83,19 +86,13 @@
  */
 
 import {
-	createBashTool,
-	createEditTool,
-	createFindTool,
-	createGrepTool,
-	createLsTool,
-	createReadTool,
-	createWriteTool,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type Theme,
 	renderDiff,
 	sessionEntryToContextMessages,
-	type ToolDefinition,
+	type ToolRendererResolver,
+	type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
@@ -157,11 +154,10 @@ const RAIL_MID = "├ ";
 const RAIL_END = "└ ";
 
 const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "find", "grep", "ls"] as const;
-type BuiltinToolName = (typeof BUILTIN_TOOLS)[number];
 const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set(BUILTIN_TOOLS);
 
 /** Render context type without importing it (it is not exported from the package root). */
-type RenderContext = Parameters<NonNullable<ToolDefinition<any, any, any>["renderCall"]>>[2];
+type RenderContext = Parameters<NonNullable<ToolRenderers["renderCall"]>>[2];
 
 /** Shared 0-line component: rows rendered with `renderShell: "self"` disappear entirely. */
 const NO_LINES: Component = {
@@ -846,84 +842,79 @@ function foldThinkingOfMessage(message: any): any | undefined {
 }
 
 // =============================================================================
-// Tool registration
+// Tool renderers
 // =============================================================================
-type NativeTool = ToolDefinition<any, any, any>;
+//
+// The built-ins are NOT re-registered: `registerToolRenderer` draws them, so pi keeps
+// its own definitions (description / promptSnippet / promptGuidelines, constrained
+// sampling, and the native execute) and the active set stays entirely with
+// `defaultTools` / `--tools` — `-ls` disables `ls` without this extension having to
+// opt out of activation.
 
-const nativeToolCache = new Map<string, Record<BuiltinToolName, NativeTool>>();
-
-function nativeTools(cwd: string): Record<BuiltinToolName, NativeTool> {
-	let tools = nativeToolCache.get(cwd);
-	if (!tools) {
-		tools = {
-			read: createReadTool(cwd) as unknown as NativeTool,
-			bash: createBashTool(cwd) as unknown as NativeTool,
-			edit: createEditTool(cwd) as unknown as NativeTool,
-			write: createWriteTool(cwd) as unknown as NativeTool,
-			find: createFindTool(cwd) as unknown as NativeTool,
-			grep: createGrepTool(cwd) as unknown as NativeTool,
-			ls: createLsTool(cwd) as unknown as NativeTool,
-		};
-		nativeToolCache.set(cwd, tools);
-	}
-	return tools;
+function renderersFor(name: string): ToolRenderers {
+	return {
+		renderShell: "self",
+		renderCall: (args: any, renderTheme: Theme, context: RenderContext) => {
+			currentTheme = renderTheme;
+			repaint = context.invalidate;
+			const entry = ensureEntry(context.toolCallId, name, args);
+			entry.expanded = context.expanded;
+			// Join while the args are still streaming; pending/startedAt stay untouched
+			// until tool_execution_start says the call really runs. A row that belongs to
+			// a stored transcript joins the block that transcript puts it in instead.
+			if (!entry.group && !attachReplayGroup(entry) && live && !entry.hasResult) joinGroup(entry);
+			if (isLeader(entry)) entry.group!.expanded = context.expanded;
+			entry.row ??= new RowComponent(entry);
+			return entry.row;
+		},
+		renderResult: (result: any, options: any, renderTheme: Theme, context: RenderContext) => {
+			currentTheme = renderTheme;
+			repaint = context.invalidate;
+			const entry = entries.get(context.toolCallId);
+			if (entry) {
+				captureResult(entry, result);
+				captureDetails(entry, result);
+				// NOTE: the object passed to renderResult only carries content/details —
+				// `result.isError` is undefined here and would clobber the flag set by
+				// tool_execution_end. context.isError mirrors the row's real state and
+				// is also correct for replayed history.
+				entry.isError = context.isError;
+				if (!options?.isPartial) {
+					entry.pending = false;
+					entry.hasResult = true;
+				}
+				entry.expanded = context.expanded;
+				if (isLeader(entry)) entry.group!.expanded = context.expanded;
+			}
+			return NO_LINES;
+		},
+	};
 }
 
 export default function (pi: ExtensionAPI) {
 	installThinkingFold();
-	for (const name of BUILTIN_TOOLS) {
-		const native = nativeTools(process.cwd())[name];
-		pi.registerTool({
-			// Keep pi's own metadata (description / promptSnippet / promptGuidelines)
-			// and constrained sampling request; only the renderers change.
-			...native,
-			// Only swap renderers: leave the active set to `defaultTools` / `--tools`,
-			// so e.g. `"-ls"` still disables a tool this extension re-registers.
-			defaultActive: false,
-			renderShell: "self",
-			execute: (
-				toolCallId: string,
-				params: any,
-				signal: AbortSignal | undefined,
-				onUpdate: any,
-				ctx: ExtensionContext,
-			) => nativeTools(ctx?.cwd ?? process.cwd())[name].execute(toolCallId, params, signal, onUpdate, ctx),
-			renderCall: (args: any, renderTheme: Theme, context: RenderContext) => {
-				currentTheme = renderTheme;
-				repaint = context.invalidate;
-				const entry = ensureEntry(context.toolCallId, name, args);
-				entry.expanded = context.expanded;
-				// Join while the args are still streaming; pending/startedAt stay untouched
-				// until tool_execution_start says the call really runs. A row that belongs to
-				// a stored transcript joins the block that transcript puts it in instead.
-				if (!entry.group && !attachReplayGroup(entry) && live && !entry.hasResult) joinGroup(entry);
-				if (isLeader(entry)) entry.group!.expanded = context.expanded;
-				entry.row ??= new RowComponent(entry);
-				return entry.row;
-			},
-			renderResult: (result: any, options: any, renderTheme: Theme, context: RenderContext) => {
-				currentTheme = renderTheme;
-				repaint = context.invalidate;
-				const entry = entries.get(context.toolCallId);
-				if (entry) {
-					captureResult(entry, result);
-					captureDetails(entry, result);
-					// NOTE: the object passed to renderResult only carries content/details —
-					// `result.isError` is undefined here and would clobber the flag set by
-					// tool_execution_end. context.isError mirrors the row's real state and
-					// is also correct for replayed history.
-					entry.isError = context.isError;
-					if (!options?.isPartial) {
-						entry.pending = false;
-						entry.hasResult = true;
-					}
-					entry.expanded = context.expanded;
-					if (isLeader(entry)) entry.group!.expanded = context.expanded;
-				}
-				return NO_LINES;
-			},
-		});
-	}
+
+	/**
+	 * Draw a tool with our renderers — but only while pi's own definition is the one in
+	 * the registry. Another extension may have shadowed the name we handle (or the name
+	 * may not be registered at all, e.g. excluded through `--tools`, or replayed from a
+	 * session that had it); then that definition's own renderers stay in charge.
+	 */
+	const ownsTool = (name: string): boolean => {
+		if (!BUILTIN_TOOL_NAMES.has(name)) return false;
+		try {
+			const registered = pi.getAllTools().find((tool) => tool.name === name);
+			// A built-in is registered as exactly `builtin:<name>`; an extension (even a
+			// built-in one, such as `builtin:mcp`) registers under its own path.
+			return !registered || registered.sourceInfo.path === `builtin:${name}`;
+		} catch {
+			// Registry not up yet: our names are the built-in ones by definition.
+			return true;
+		}
+	};
+
+	const resolver: ToolRendererResolver = (toolName, next) => (ownsTool(toolName) ? renderersFor(toolName) : next());
+	pi.registerToolRenderer(resolver);
 
 	pi.on("session_start", (_event, ctx) => {
 		currentTheme = ctx.ui.theme;
