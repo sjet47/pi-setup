@@ -877,6 +877,9 @@ export default function (pi: ExtensionAPI) {
 			// Keep pi's own metadata (description / promptSnippet / promptGuidelines)
 			// and constrained sampling request; only the renderers change.
 			...native,
+			// Only swap renderers: leave the active set to `defaultTools` / `--tools`,
+			// so e.g. `"-ls"` still disables a tool this extension re-registers.
+			defaultActive: false,
 			renderShell: "self",
 			execute: (
 				toolCallId: string,
