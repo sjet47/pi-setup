@@ -87,15 +87,17 @@ test("summaryOf: bash shows the first line of a multi-line command", () => {
 	assert.equal(summaryOf("bash", { command: long }), long);
 });
 
-test("pickCollapsedTool: newest running > most recent failed > last", () => {
+test("pickCollapsedTool: newest running > last call", () => {
 	const a = tool("bash", "running");
 	const b = tool("read", "failed");
 	const c = tool("bash", "running");
 	const d = tool("grep", "ok");
 	assert.equal(pickCollapsedTool([a, b, c, d]), c);
-	assert.equal(pickCollapsedTool([tool("ls", "ok"), b, tool("read", "failed"), d]).name, "read");
-	const failures = [tool("ls", "ok"), b, d];
-	assert.equal(pickCollapsedTool(failures), b);
+	// An older failure does not latch the activity line: the newest call wins.
+	assert.equal(pickCollapsedTool([b, d]), d);
+	assert.equal(pickCollapsedTool([tool("ls", "ok"), b, d]), d);
+	// A failure is still shown while it is the newest call.
+	assert.equal(pickCollapsedTool([tool("ls", "ok"), d, b]), b);
 	assert.equal(pickCollapsedTool([tool("ls", "ok"), d, tool("write", "queued")]).name, "write");
 });
 

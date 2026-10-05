@@ -10,16 +10,14 @@
  * Once every call of the batch is done (the block is closed and nothing is running)
  * the activity line goes away and only the header — the block's stat line — is left:
  *
- *   ✓ 7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
+ *   7 tool calls (4 read, 2 grep, 1 bash) · 3.2s · Ctrl+O to expand
  *
- * A failure keeps its tail there, since that line is then the only trace of the run:
+ * The header reports what the batch did, never how it turned out (see headerState).
+ * While the block is open the activity line shows the call in progress, or — with
+ * nothing executing — the newest call, so a failure stays on that line only while it
+ * is the newest call. An earlier one is visible after Ctrl+O:
  *
- *   ✗ 3 tool calls (2 bash, 1 edit) · 1 failed · 3.0s — cd: /nope: No such file or directory (exit 1) · Ctrl+O to expand
- *
- * After Ctrl+O either kind shows one row per tool with a result preview (bash:
- * last lines, edit: its diff, everything else: first lines):
- *
- *   ✗ 3 tool calls (2 bash, 1 edit) · 1 failed · 3.0s
+ *   3 tool calls (2 bash, 1 edit) · 3.0s · Ctrl+O to expand
  *   ├ ✓ bash: sleep 3 && echo one (3.0s)
  *   │   one
  *   ├ ✓ edit: src/a.ts +2 −1 (0.0s)
@@ -27,14 +25,16 @@
  *   │   +12 new line
  *   └ ✗ bash: cd /nope (0.0s) — cd: /nope: No such file or directory (exit 1)
  *
- * instead of native rows (blank / `$ cmd` / blank / output / blank /
- * `Took X.Xs` / blank each).
+ * Ctrl+O expands the block into one row per tool plus a result preview (bash: its last
+ * lines, edit: its diff, everything else: first lines) instead of native rows
+ * (blank / `$ cmd` / blank / output / blank / `Took X.Xs` / blank each).
  *
  * Icons: ○ queued (args streaming, waiting, or never ran) · spinner running ·
  * ✓ / ✗ finished. The header shows a static ⠿ while the block is still open
- * but nothing is executing (the model is writing the next call) and settles to
- * ✓ / ✗ / ○ only once the block is closed. Header time is the union of the
- * tool execution intervals, i.e. pure tool time.
+ * but nothing is executing (the model is writing the next call), and once the block
+ * is closed it carries no glyph at all: the header never reports success, failure or
+ * abort (2026-09-22). Header time is the union of the tool execution intervals, i.e.
+ * pure tool time.
  *
  * Design notes:
  *
@@ -668,7 +668,8 @@ function renderGroupBlock(group: ToolGroup, width: number): string[] {
 	} else if (!multi) {
 		visible = group.tools.slice(0, 1);
 	} else if (!settled) {
-		// The call still running, else the most recent failure, else the last call.
+		// The call still running, else the newest call: the activity line follows the batch,
+		// it does not latch onto an older failure (see pickCollapsedTool).
 		visible = [pickCollapsedTool(group.tools)];
 		lines.push(headerLine(headerIcon(state, now), EXPAND_HINT));
 	} else {

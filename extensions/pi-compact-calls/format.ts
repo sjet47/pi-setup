@@ -275,16 +275,18 @@ export function summaryOf(name: string, rawArgs: any): string {
 }
 
 /**
- * The single call shown while collapsed: the newest still-running call wins,
- * then the most recent failure (so a collapsed block never hides one), then the
- * last call.
+ * The single call shown while collapsed: the newest still-running call wins (the
+ * block is working), otherwise the last call. The line follows the batch instead of
+ * latching onto an old failure, which used to keep a red `✗` on screen for the rest
+ * of the block while every later call succeeded (2026-10-05).
+ *
+ * So a failure shows on that line only while it is the newest call; an earlier one
+ * shows after Ctrl+O. The block's own background (pi tints it by the leader row's
+ * outcome) is the only failure hint left in the collapsed state.
  */
 export function pickCollapsedTool<T extends ToolView>(tools: readonly T[]): T {
 	for (let index = tools.length - 1; index >= 0; index--) {
 		if (tools[index]!.pending) return tools[index]!;
-	}
-	for (let index = tools.length - 1; index >= 0; index--) {
-		if (toolState(tools[index]!) === "failed") return tools[index]!;
 	}
 	return tools[tools.length - 1]!;
 }
