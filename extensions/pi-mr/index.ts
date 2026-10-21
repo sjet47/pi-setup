@@ -24,7 +24,12 @@ import {
 } from "./forge.ts";
 import { renderMrLine, type ColorRole } from "./format.ts";
 
-const STATUS_KEY = "mr";
+/**
+ * Footer status key. pi draws one status line with every `setStatus` entry, sorted
+ * by key alphabetically, so the key doubles as a layout slot: `zzz-` keeps the MR
+ * to the right of pi-execution-time's `zz-execution-time-total` (Σ runtime).
+ */
+const STATUS_KEY = "zzz-mr";
 /** How often the branch is re-read, so a `git switch` shows up promptly. */
 const BRANCH_POLL_MS = 5_000;
 /** How long a fetched request stays fresh before being re-queried. */

@@ -24,6 +24,16 @@ Nothing is shown — no placeholder — when the directory is not a git repo, th
 branch has no request, the HEAD is detached, no forge remote exists, or the CLI
 fails. Stale data is never shown; a failed lookup clears the line and backs off.
 
+## Position on the status line
+
+pi joins every `setStatus` entry into one line sorted by key, so the key is the
+layout slot. `pi-mr` registers as `zzz-mr`, which places the MR to the right of
+the Σ runtime from `pi-execution-time` (`zz-execution-time-total`):
+
+```
+⏱ task 12s · 10:31  Σ runtime 1h04m  ✔ !31681 ✓CI …
+```
+
 ## How data is fetched
 
 1. `git rev-parse --abbrev-ref HEAD` every 5s, so `git switch` is picked up promptly (5s `git` timeout).
