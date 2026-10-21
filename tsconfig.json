@@ -21,6 +21,7 @@
     "extensions/pi-wordle",
     "extensions/pi-note",
     "extensions/pi-compact-calls",
-    "extensions/pi-recap/src"
+    "extensions/pi-recap/src",
+    "extensions/pi-mr"
   ]
 }

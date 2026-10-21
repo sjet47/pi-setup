@@ -34,6 +34,7 @@ pi install git:github.com/sjet47/pi-setup@v0.1.0
 | `pi-wordle/` | Play Wordle: `/wordle` activates the (hidden-by-default) wordle tools & the model plays the daily puzzle, tracking streak/stats | [local] |
 | `pi-note/` | Project-level file memory (`MEMORY.md` index + one file per topic) and a per-session scratchpad dir — Claude Code style, browsable with `/memory` | [local] |
 | `pi-recap/` | One-line session recap on demand, on resume, or after five idle minutes; preserves the existing model config | [tifandotme/pi-extensions](https://github.com/tifandotme/pi-extensions/tree/master/packages/pi-recap) |
+| `pi-mr/` | Show the current branch's MR/PR in the bottom status line: state, `glab`/`gh` link, CI status, conflicts | [local] |
 
 ### Migrating pi-recap
 
