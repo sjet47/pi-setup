@@ -7,6 +7,7 @@ import {
 	buildTopics,
 	normalizeLink,
 	parseIndex,
+	removeIndexEntry,
 	stripHook,
 	topicMatchText,
 	type MemoryFileInfo,
@@ -113,6 +114,24 @@ test("buildTopics assumes nested targets and unknown listings exist", () => {
 	const unknown = buildTopics("- [Any](any.md) — hook\n");
 	assert.equal(unknown[0].exists, true);
 	assert.deepEqual(unknown.map((topic) => topic.file), ["any.md"]);
+});
+
+test("removeIndexEntry drops every line for one file and keeps the rest byte for byte", () => {
+	const index = [
+		"# Memory",
+		"",
+		"- [Keep](keep.md) — k",
+		"- [Gone](gone.md) — g",
+		"1. [Gone again](./gone.md) — duplicate",
+		"- [Tail](tail.md) — t",
+		"",
+	].join("\n");
+	assert.equal(
+		removeIndexEntry(index, "gone.md"),
+		["# Memory", "", "- [Keep](keep.md) — k", "- [Tail](tail.md) — t", ""].join("\n"),
+	);
+	// A file the index does not mention leaves the text untouched.
+	assert.equal(removeIndexEntry(index, "other.md"), index);
 });
 
 test("topicMatchText covers title, file and hook", () => {

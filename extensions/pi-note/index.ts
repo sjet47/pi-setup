@@ -7,9 +7,12 @@
 //   tool_call            expand the scratchpad var in non-shell tool arguments
 // Memory reads/writes are left entirely to the agent's own read/write/edit tools.
 //
-// One read-only command: `/memory` opens the browser overlay over the topics in
+// One command: `/memory` opens the browser overlay over the topics in
 // MEMORY.md (browser.ts). It reads from disk on every invocation, so it shows
-// memories written after session_start, and it never writes anything.
+// memories written after session_start. The overlay itself only deletes (Ctrl+D
+// twice: file + index line); editing hands the real file to the external editor
+// (Enter in the detail view), so memory writes still never go through a bespoke
+// parser — the file is edited as markdown, by vim or by the agent.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { SCRATCH_ENV_VAR, memoryRootLabel, resolvePaths } from "./paths.ts";
@@ -17,7 +20,8 @@ import { memoryRootFor } from "./git-root.ts";
 import { prepareSession } from "./prepare.ts";
 import { buildPromptAppend } from "./prompt.ts";
 import { expandInputStrings } from "./expand.ts";
-import { loadTopics, readTopicBody } from "./memory-store.ts";
+import { deleteTopic, loadTopics, readTopicBody, resolveInside } from "./memory-store.ts";
+import { editFileInEditor, readExternalEditorSetting, resolveEditorCommand } from "./editor.ts";
 import { MemoryBrowserOverlay } from "./browser.ts";
 
 export default function piNoteExtension(pi: ExtensionAPI) {
@@ -87,17 +91,40 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 			// frozen session_start snapshot injected into the system prompt.
 			const topics = loadTopics(memoryDir);
 			const label = memoryRootLabel(memoryRoot);
+			// Resolved per invocation: settings.json may change between opens.
+			const editorCommand = resolveEditorCommand(
+				readExternalEditorSetting(getAgentDir()),
+				process.env,
+			);
 			await ctx.ui.custom<void>(
 				(tui, theme, keybindings, done) => {
 					const overlay = new MemoryBrowserOverlay({
 						topics,
 						label,
+						memoryDir,
 						terminalRows: () => tui.terminal.rows,
 						now: () => Date.now(),
 						theme,
 						markdownTheme: getMarkdownTheme(),
 						keybindings,
 						readBody: (topic) => readTopicBody(memoryDir, topic.file),
+						reloadTopics: () => loadTopics(memoryDir),
+						deleteTopic: (topic) => deleteTopic(memoryDir, topic),
+						editFile: async (topic) => {
+							const target = resolveInside(memoryDir, topic.file);
+							if (target === undefined) return "unsafe path in MEMORY.md";
+							// Same hand-over as pi's own Ctrl+G: stop the TUI so the editor
+							// owns the terminal, then repaint everything on return.
+							tui.stop();
+							try {
+								const result = await editFileInEditor(editorCommand, target);
+								return result.ok ? undefined : result.error;
+							} finally {
+								tui.start();
+								tui.requestRender(true);
+							}
+						},
+						requestRender: () => tui.requestRender(true),
 						onDone: () => done(undefined),
 					});
 					return {

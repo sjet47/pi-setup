@@ -3,8 +3,8 @@
 Project-level **file-based memory** + a per-session **scratchpad dir** for pi,
 ported from Claude Code's two mechanisms. Full behavioral spec: `../../docs/pi-note.md`.
 
-Three hooks and one **read-only** command — nothing appears in the UI unless you
-run `/memory` or memory init fails (one error notify).
+Three hooks and one command — nothing appears in the UI unless you run
+`/memory` or memory init fails (one error notify).
 
 | Hook | What it does |
 |---|---|
@@ -14,7 +14,8 @@ run `/memory` or memory init fails (one error notify).
 
 The agent reads and writes memories itself with its built-in `read`/`write`/
 `edit`/`bash` tools; the plugin never parses memory files and never maintains
-anything itself.
+anything itself. The only exception is deleting through the `/memory` overlay
+(file + its index line), described below.
 
 ## `/memory` — browse this project's memories
 
@@ -35,7 +36,7 @@ every invocation, so memories written after `session_start` show up immediately
 │   draft-notes.md                                  12 B · 1mo     │
 │ ──────────────────────────────────────────────────────────────── │
 │ Search: draft                                                     │
-│ ↑↓ navigate · Enter open · Esc close                              │
+│ ↑↓ navigate · Enter open · Ctrl+D delete · Esc close                  │
 ╰──────────────────────────────────────────────────────────────────╯
 ```
 
@@ -51,10 +52,21 @@ every invocation, so memories written after `session_start` show up immediately
   The column is dropped on a narrow overlay so the title keeps its room.
 - **Level 2** — `Enter` opens the linked file rendered as markdown,
   scrollable with `↑↓` / `PgUp` / `PgDn` / `Home` / `End` and a line counter in
-  the footer.
+  the footer. The row under the title is the file's **absolute path** (truncated
+  from the left on a narrow overlay, so the file name stays visible).
+- **Editing** — `Enter` in the detail view hands the file to the external
+  editor (`settings.json` `externalEditor` → `$VISUAL` → `$EDITOR` → `nano`,
+  the same chain pi uses for Ctrl+G), then re-reads it so the rendered body is
+  never stale. A non-zero exit or a failed spawn is reported in the hint row.
+  On a very short terminal the path row is dropped rather than overflowing the
+  frame.
 - **Keys** — `Esc` closes the list, but only steps back a level from the detail
   view (the search query survives); `Ctrl+C` closes from either level.
-- The overlay is read-only by design: editing a memory is the agent's job.
+- **Deleting** — `Ctrl+D` in the list arms the selected memory (the hint row
+  turns into `Ctrl+D again to delete “Title”`, any other key cancels); a second
+  `Ctrl+D` removes the file **and** its `MEMORY.md` line. Indexed, unindexed and
+  stale (`missing`) rows all work; the index is rewritten atomically. A failed
+  delete is reported and changes nothing.
 
 ## Directory layout
 
@@ -80,7 +92,8 @@ every invocation, so memories written after `session_start` show up immediately
   systemd `tmpfiles.d`) — no expiry handling is built in.
 
 The memory dir is only ever created by `session_start`. Memories are plain
-markdown files; `/memory` browses them, nothing else manages them.
+markdown files; `/memory` browses them and can delete one (file + index line),
+nothing else manages them.
 
 ## Moving the memory dir (symlink)
 

@@ -97,6 +97,21 @@ export function parseIndex(indexText: string): MemoryTopic[] {
 }
 
 /**
+ * MEMORY.md with every index line pointing at `file` removed — the other lines
+ * are kept byte for byte (order, formatting, trailing newline). Used when the
+ * browser deletes a memory, so the index never keeps a line for a gone file.
+ */
+export function removeIndexEntry(indexText: string, file: string): string {
+	return indexText
+		.split("\n")
+		.filter((line) => {
+			const match = INDEX_LINE.exec(line);
+			return match === null || normalizeLink(match[2]) !== file;
+		})
+		.join("\n");
+}
+
+/**
  * Topic rows for the browser: index entries (order preserved) followed by
  * memory files the index does not mention, sorted by name.
  *

@@ -1,10 +1,12 @@
-// Filesystem side of the `/memory` browser. Read-only: the plugin still never
-// writes memories itself (SPEC §2) — the overlay only shows what is on disk,
-// read fresh on every open so it is never stale against the session snapshot.
-import { readFileSync, readdirSync, statSync } from "node:fs";
+// Filesystem side of the `/memory` browser. Reads are fresh on every call, so
+// the overlay is never stale against the session snapshot. The only write is
+// `deleteTopic` (Ctrl+D in the list): it removes the memory file and its
+// MEMORY.md line, and nothing else — editing a memory is still the agent's or
+// the external editor's job.
+import { readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { MEMORY_INDEX_NAME } from "./paths.ts";
-import { buildTopics, type MemoryFileInfo, type MemoryTopic } from "./memory-index.ts";
+import { buildTopics, removeIndexEntry, type MemoryFileInfo, type MemoryTopic } from "./memory-index.ts";
 
 /**
  * Every regular file in the memory dir, with the size and mtime the browser
@@ -75,6 +77,71 @@ export function resolveInside(dir: string, file: string): string | undefined {
 	const rel = relative(root, target);
 	if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return undefined;
 	return target;
+}
+
+export type MemoryMutationResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Delete one memory: unlink the file, then drop every MEMORY.md line that points
+ * at it. A missing file still gets its (stale) index line removed — that is how
+ * a `missing` row is cleaned up. The index is written via a temp file and a
+ * rename, so a crash mid-write leaves the old MEMORY.md intact.
+ */
+export function deleteTopic(memoryDir: string, topic: MemoryTopic): MemoryMutationResult {
+	const target = resolveInside(memoryDir, topic.file);
+	if (target === undefined) return { ok: false, error: "unsafe path in MEMORY.md" };
+	try {
+		unlinkSync(target);
+	} catch (err) {
+		// Already gone: the index line (if any) is still worth cleaning up.
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+			return { ok: false, error: describeError(err) };
+		}
+	}
+	if (!topic.indexed) return { ok: true };
+
+	const indexPath = join(memoryDir, MEMORY_INDEX_NAME);
+	let indexText: string;
+	try {
+		indexText = readFileSync(indexPath, "utf8");
+	} catch {
+		// No index on disk: the file was the whole memory.
+		return { ok: true };
+	}
+	const updated = removeIndexEntry(indexText, topic.file);
+	if (updated === indexText) return { ok: true };
+	try {
+		writeFileAtomic(indexPath, updated);
+	} catch (err) {
+		return { ok: false, error: `file deleted, but MEMORY.md was not updated: ${describeError(err)}` };
+	}
+	return { ok: true };
+}
+
+function writeFileAtomic(path: string, text: string): void {
+	const temp = `${path}.tmp-${process.pid}`;
+	// Keep the index's mode: a 0600 MEMORY.md must not turn into 0644.
+	let mode: number | undefined;
+	try {
+		mode = statSync(path).mode;
+	} catch {
+		mode = undefined;
+	}
+	try {
+		writeFileSync(temp, text, mode === undefined ? "utf8" : { encoding: "utf8", mode });
+		renameSync(temp, path);
+	} catch (err) {
+		try {
+			unlinkSync(temp);
+		} catch {
+			// Best-effort cleanup; the real error is the one below.
+		}
+		throw err;
+	}
+}
+
+function describeError(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
 }
 
 /** UTF-8 size of a memory file, for the detail header. */

@@ -6,15 +6,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { CHROME_LINES, MemoryBrowserOverlay, formatAge, overlayHeight } from "../browser.ts";
+import { CHROME_LINES, DETAIL_CHROME_LINES, MemoryBrowserOverlay, formatAge, overlayHeight } from "../browser.ts";
 import { buildTopics, type MemoryFileInfo, type MemoryTopic } from "../memory-index.ts";
+import type { MemoryMutationResult } from "../memory-store.ts";
 
 const ESC = "\x1b";
 const ENTER = "\r";
+const CTRL_D = "\x04";
 const DOWN = "\x1b[B";
 const PAGE_DOWN = "\x1b[6~";
 const WIDTH = 78;
 const ROWS = 40;
+/** Fake absolute memory dir, so the detail path row is deterministic. */
+const MEMORY_DIR = "/home/sjet/.pi/agent/pi-note/--home-sjet-repo-pi-setup--";
 /** Fixed clock so the right-hand age column is deterministic. */
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = 1_760_000_000_000;
@@ -73,12 +77,24 @@ function harness(options: {
 	bodies?: Record<string, string>;
 	rows?: number;
 	theme?: Theme;
+	memoryDir?: string;
+	/** What the fake editor writes when it is handed a file. */
+	editWrites?: Record<string, string>;
+	/** Error the fake editor returns for a file, keyed by file name. */
+	editErrors?: Record<string, string>;
+	/** Overrides the fake store's delete result (to exercise the failure path). */
+	deleteResult?: MemoryMutationResult;
 }) {
-	const bodies = options.bodies ?? {};
+	let topics = options.topics;
+	const bodies = { ...(options.bodies ?? {}) };
+	const deleted: string[] = [];
+	const edited: string[] = [];
+	let renders = 0;
 	let closed = 0;
 	const overlay = new MemoryBrowserOverlay({
-		topics: options.topics,
+		topics,
 		label: "home/sjet/repo/pi-setup",
+		memoryDir: options.memoryDir ?? MEMORY_DIR,
 		terminalRows: () => options.rows ?? ROWS,
 		now: () => NOW,
 		theme: options.theme ?? theme,
@@ -88,6 +104,25 @@ function harness(options: {
 			topic.file in bodies
 				? { ok: true, text: bodies[topic.file] }
 				: { ok: false, error: "file is missing" },
+		reloadTopics: () => topics,
+		deleteTopic: (topic) => {
+			if (options.deleteResult) return options.deleteResult;
+			deleted.push(topic.file);
+			topics = topics.filter((entry) => entry.file !== topic.file);
+			delete bodies[topic.file];
+			return { ok: true };
+		},
+		editFile: async (topic) => {
+			edited.push(topic.file);
+			const error = options.editErrors?.[topic.file];
+			if (error !== undefined) return error;
+			const written = options.editWrites?.[topic.file];
+			if (written !== undefined) bodies[topic.file] = written;
+			return undefined;
+		},
+		requestRender: () => {
+			renders += 1;
+		},
 		onDone: () => {
 			closed += 1;
 		},
@@ -95,9 +130,17 @@ function harness(options: {
 	return {
 		overlay,
 		closedCount: () => closed,
+		deletedFiles: () => deleted,
+		editedFiles: () => edited,
+		renderCount: () => renders,
 		lines: () => overlay.render(WIDTH),
 		render: () => overlay.render(WIDTH).join("\n"),
 	};
+}
+
+/** Let a `void`-ed async handler (`editSelected`) settle. */
+async function settle(): Promise<void> {
+	await new Promise((resolve) => setImmediate(resolve));
 }
 
 function sampleTopics(): MemoryTopic[] {
@@ -122,7 +165,7 @@ test("level 1 shows the header, topics, hooks and the unindexed section", () => 
 	assert.match(screen, /unindexed \(1\)/);
 	assert.match(screen, /orphan\.md/);
 	assert.match(screen, /Search:/);
-	assert.match(screen, /Enter open · Esc close/);
+	assert.match(screen, /Enter open · Ctrl\+D delete · Esc close/);
 });
 
 test("every level renders exactly the overlay height", () => {
@@ -136,7 +179,8 @@ test("every level renders exactly the overlay height", () => {
 	assert.equal(lines().length, height);
 	overlay.handleInput(ENTER);
 	assert.equal(lines().length, height);
-	assert.equal(height - CHROME_LINES, 11); // body height the scroll math uses
+	// The detail view spends one more row on the path, one less on the body.
+	assert.equal(height - DETAIL_CHROME_LINES, 10);
 });
 
 test("typing filters topics by title, file and hook", () => {
@@ -218,20 +262,20 @@ test("detail scrolling follows the file and clamps at the end", () => {
 	const { overlay, render } = harness({
 		topics: sampleTopics(),
 		bodies: { "alpha.md": list },
-		rows: 24, // body height 11
+		rows: 24, // body height 10 (the detail view spends a row on the path)
 	});
 	overlay.handleInput(ENTER);
 	assert.match(render(), /LINE-01/);
-	assert.match(render(), /lines 1-11 of 60/);
+	assert.match(render(), /lines 1-10 of 60/);
 
 	for (let press = 0; press < 20; press += 1) overlay.handleInput(PAGE_DOWN);
 	const bottom = render();
 	assert.match(bottom, /LINE-60/);
 	assert.doesNotMatch(bottom, /LINE-01/);
-	assert.match(bottom, /lines 50-60 of 60/);
+	assert.match(bottom, /lines 51-60 of 60/);
 
 	for (let press = 0; press < 5; press += 1) overlay.handleInput(PAGE_DOWN);
-	assert.match(render(), /lines 50-60 of 60/);
+	assert.match(render(), /lines 51-60 of 60/);
 });
 
 test("an index line whose file is gone is marked and reports the error", () => {
@@ -388,10 +432,119 @@ test("the frame keeps one color on every row, separators included", () => {
 	assert.match(separatorRow, /\u001b\[90m─+/);
 });
 
-test("an unreadable file never throws out of render", () => {
-	const { overlay, render } = harness({ topics: sampleTopics() });
-	overlay.handleInput(ENTER); // alpha.md has no fake body -> error path
-	assert.match(render(), /alpha\.md — file is missing/);
+test("detail shows the memory file's absolute path under the title", () => {
+	const { overlay, lines } = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "# Alpha\nbody\n" },
+	});
+	assert.ok(!lines().join("\n").includes(MEMORY_DIR), "the list has no path row");
+	overlay.handleInput(ENTER);
+	const rendered = lines();
+	assert.match(rendered[1], /Alpha/);
+	assert.ok(rendered[2].includes(`${MEMORY_DIR}/alpha.md`), rendered[2]);
+	assert.equal(rendered.length, overlayHeight(ROWS));
+});
+
+test("a narrow detail path is truncated from the left, keeping the file name", () => {
+	const { overlay } = harness({ topics: sampleTopics(), bodies: { "alpha.md": "# Alpha\n" } });
+	overlay.handleInput(ENTER);
+	const pathRow = overlay.render(30)[2];
+	assert.match(pathRow, /….*\/alpha\.md/);
+	assert.equal(visibleWidth(pathRow), 30);
+});
+
+test("Ctrl+D twice deletes the selected memory; one press only arms it", () => {
+	const { overlay, render, deletedFiles } = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "# Alpha\n", "beta.md": "# Beta\n" },
+	});
+	overlay.handleInput(CTRL_D);
+	assert.deepEqual(deletedFiles(), []);
+	assert.match(render(), /Ctrl\+D again to delete “Alpha” · any other key cancels/);
+
+	overlay.handleInput(CTRL_D);
+	assert.deepEqual(deletedFiles(), ["alpha.md"]);
+	const after = render();
+	assert.doesNotMatch(after, /first memory/); // the row is gone
+	assert.match(after, /› Beta/); // the next row takes the cursor
+	assert.match(after, /Deleted alpha\.md/);
+	assert.match(after, /1 topic · 1 unindexed/); // counts come from the reloaded list
+});
+
+test("any key between the two Ctrl+D presses cancels the delete", () => {
+	const { overlay, render, deletedFiles } = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "# Alpha\n", "beta.md": "# Beta\n" },
+	});
+	overlay.handleInput(CTRL_D);
+	overlay.handleInput(DOWN);
+	assert.deepEqual(deletedFiles(), []);
+	assert.match(render(), /› Beta/);
+	assert.match(render(), /Enter open · Ctrl\+D delete · Esc close/);
+});
+
+test("Ctrl+D on another row re-arms instead of deleting", () => {
+	const { overlay, deletedFiles } = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "# Alpha\n", "beta.md": "# Beta\n" },
+	});
+	overlay.handleInput(CTRL_D); // arm Alpha
+	overlay.handleInput(DOWN); // cancel, move to Beta
+	overlay.handleInput(CTRL_D); // arm Beta
+	assert.deepEqual(deletedFiles(), []);
+	overlay.handleInput(CTRL_D);
+	assert.deepEqual(deletedFiles(), ["beta.md"]);
+});
+
+test("a failed delete is reported and leaves the row in place", () => {
+	const { overlay, render, deletedFiles } = harness({
+		topics: sampleTopics(),
+		deleteResult: { ok: false, error: "EACCES: permission denied" },
+	});
+	overlay.handleInput(CTRL_D);
+	overlay.handleInput(CTRL_D);
+	assert.deepEqual(deletedFiles(), []);
+	assert.match(render(), /Delete failed — EACCES: permission denied/);
+	assert.match(render(), /› Alpha/);
+
+	overlay.handleInput(DOWN); // the notice is transient
+	assert.doesNotMatch(render(), /Delete failed/);
+});
+
+test("Enter in the detail view edits the file externally and re-reads it", async () => {
+	const { overlay, render, editedFiles, renderCount } = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "# Alpha\n\nOLD-BODY\n" },
+		editWrites: { "alpha.md": "# Alpha\n\nNEW-BODY\n" },
+	});
+	overlay.handleInput(ENTER);
+	assert.match(render(), /OLD-BODY/);
+	overlay.handleInput(ENTER);
+	await settle();
+	assert.deepEqual(editedFiles(), ["alpha.md"]);
+	assert.match(render(), /NEW-BODY/);
+	assert.doesNotMatch(render(), /OLD-BODY/);
+	assert.ok(renderCount() > 0, "the overlay repaints after the editor exits");
+});
+
+test("an editor failure is reported in the hint row", async () => {
+	const { overlay, render } = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "# Alpha\n" },
+		editErrors: { "alpha.md": "editor exited with code 1" },
+	});
+	overlay.handleInput(ENTER);
+	overlay.handleInput(ENTER);
+	await settle();
+	assert.match(render(), /Editor failed — editor exited with code 1/);
+});
+
+test("Enter never opens the editor for a missing memory file", async () => {
+	const { overlay, editedFiles } = harness({ topics: sampleTopics() });
+	overlay.handleInput(ENTER); // alpha.md has no body
+	overlay.handleInput(ENTER);
+	await settle();
+	assert.deepEqual(editedFiles(), []);
 });
 
 test("an empty memory dir renders a hint instead of rows", () => {
@@ -408,7 +561,14 @@ test("overlayHeight stays inside the terminal and inside its limits", () => {
 });
 
 test("a very short overlay still renders a usable single-line body", () => {
-	const { lines } = harness({ topics: sampleTopics(), rows: 9 });
+	const { lines, overlay } = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "# Alpha\n" },
+		rows: 9,
+	});
+	assert.equal(lines().length, CHROME_LINES + 1);
+	overlay.handleInput(ENTER);
+	// Too short for the path row: it is dropped instead of overflowing the frame.
 	assert.equal(lines().length, CHROME_LINES + 1);
 });
 

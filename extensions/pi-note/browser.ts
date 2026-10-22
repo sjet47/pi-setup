@@ -1,7 +1,8 @@
 // The `/memory` browser overlay: a two-level view over one project's memory
 // dir. Level 1 lists the MEMORY.md topics (title + hook) and filters them by
 // fuzzy search; Enter opens the linked file rendered as markdown, ESC goes
-// back to the list, ESC again closes.
+// back to the list, ESC again closes. Ctrl+D twice deletes the selected
+// memory; in the detail view Enter opens the file in the external editor.
 //
 // Sizing note: a pi overlay clips a component's lines to `maxHeight` by
 // slicing from the top, and `ScrollView` only scrolls when the layout system
@@ -25,7 +26,7 @@ import {
 	type MarkdownTheme,
 } from "@earendil-works/pi-tui";
 import { topicMatchText, type MemoryTopic } from "./memory-index.ts";
-import { byteLength, formatBytes, type MemoryBody } from "./memory-store.ts";
+import { byteLength, formatBytes, resolveInside, type MemoryBody, type MemoryMutationResult } from "./memory-store.ts";
 
 /** Width of the selection cursor prefix (`› `). */
 const CURSOR_WIDTH = 2;
@@ -34,7 +35,10 @@ const MIN_TITLE_WIDTH = 10;
 
 /** Lines that are never part of the scrolling body: 3 above, 4 below. */
 export const CHROME_LINES = 7;
+/** Chrome in the detail view: `CHROME_LINES` plus the absolute-path row. */
+export const DETAIL_CHROME_LINES = CHROME_LINES + 1;
 const MAX_OVERLAY_HEIGHT = 34;
+const DELETE_KEY: KeyId = Key.ctrl("d");
 
 /** Total overlay height in rows for a terminal `terminalRows` rows tall. */
 export function overlayHeight(terminalRows: number): number {
@@ -60,6 +64,8 @@ export interface MemoryBrowserOptions {
 	topics: MemoryTopic[];
 	/** Header label for the memory dir, e.g. `home/sjet/repo/pi-setup`. */
 	label: string;
+	/** Absolute memory dir, used for the detail path row. */
+	memoryDir: string;
 	/** Live terminal height, so the overlay follows a resize. */
 	terminalRows: () => number;
 	/** Live clock, so the relative ages are testable and never frozen at open. */
@@ -68,7 +74,20 @@ export interface MemoryBrowserOptions {
 	markdownTheme: MarkdownTheme;
 	keybindings: KeybindingsManager;
 	readBody: (topic: MemoryTopic) => MemoryBody;
+	/** Re-read MEMORY.md + the dir listing after a delete or an edit. */
+	reloadTopics: () => MemoryTopic[];
+	/** Remove the file and its MEMORY.md line. */
+	deleteTopic: (topic: MemoryTopic) => MemoryMutationResult;
+	/** Hand the file to the external editor; resolves with an error, or undefined. */
+	editFile: (topic: MemoryTopic) => Promise<string | undefined>;
+	/** Render again after an async editor round trip. */
+	requestRender: () => void;
 	onDone: () => void;
+}
+
+interface Notice {
+	text: string;
+	level: "dim" | "warning" | "error";
 }
 
 export class MemoryBrowserOverlay implements Component, Focusable {
@@ -77,15 +96,23 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		placeholder: "type to filter",
 		placeholderStyle: (text) => this.options.theme.fg("dim", text),
 	});
+	private topics: MemoryTopic[];
 	private level: "list" | "detail" = "list";
 	private detail?: DetailState;
 	private selectedIndex = 0;
 	private windowStart = 0;
+	/** Set by the first Ctrl+D; the second one deletes. Any other key clears it. */
+	private pendingDelete?: MemoryTopic;
+	/** Transient message in the hint row (delete/editor outcome), cleared on input. */
+	private notice?: Notice;
+	/** An editor round trip is in flight; ignore a second Enter. */
+	private editing = false;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 	private _focused = false;
 
 	constructor(private readonly options: MemoryBrowserOptions) {
+		this.topics = options.topics;
 		this.searchInput.onSubmit = () => this.openSelected();
 		this.searchInput.onEscape = () => this.options.onDone();
 	}
@@ -100,6 +127,10 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		if (this.notice !== undefined) {
+			this.notice = undefined;
+			this.invalidate();
+		}
 		if (this.level === "detail") this.handleDetailInput(data);
 		else this.handleListInput(data);
 	}
@@ -114,9 +145,13 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		const body = this.level === "detail"
 			? this.detailBody(contentWidth, bodyHeight)
 			: this.listBody(contentWidth, bodyHeight);
+		const pathRow = this.showPathRow()
+			? [this.line(this.detailPathLine(contentWidth), contentWidth)]
+			: [];
 		const lines = [
 			this.border("top", width),
 			this.line(this.headerLine(contentWidth, detailLines.length), contentWidth),
+			...pathRow,
 			this.separator(contentWidth),
 			...body.map((line) => this.line(line, contentWidth)),
 			this.separator(contentWidth),
@@ -139,8 +174,19 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 
 	private handleListInput(data: string): void {
 		if (this.isCancel(data)) {
+			this.pendingDelete = undefined;
 			this.options.onDone();
 			return;
+		}
+		// Ctrl+D arms the delete; the next Ctrl+D on the same row pulls the
+		// trigger. Any other key disarms it, whether or not it also acts.
+		if (matchesKey(data, DELETE_KEY)) {
+			this.deleteSelected();
+			return;
+		}
+		if (this.pendingDelete !== undefined) {
+			this.pendingDelete = undefined;
+			this.invalidate();
 		}
 		if (this.matches(data, "tui.select.up", Key.up)) return this.moveSelection(-1);
 		if (this.matches(data, "tui.select.down", Key.down)) return this.moveSelection(1);
@@ -180,6 +226,10 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 			this.invalidate();
 			return;
 		}
+		if (this.matches(data, "tui.select.confirm", Key.enter)) {
+			void this.editSelected();
+			return;
+		}
 		const page = Math.max(1, this.bodyHeight() - 1);
 		if (matchesKey(data, Key.up)) this.scrollBy(-1);
 		else if (matchesKey(data, Key.down)) this.scrollBy(1);
@@ -217,6 +267,94 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		};
 		this.level = "detail";
 		this.invalidate();
+	}
+
+	/**
+	 * Two-step delete from the list. The first Ctrl+D only arms the row; the
+	 * second removes the file and its MEMORY.md line, then re-reads both from
+	 * disk so the list can never disagree with what is on disk.
+	 */
+	private deleteSelected(): void {
+		const row = this.rows()[this.selectedIndex];
+		if (!row || row.kind !== "topic") return;
+		if (this.pendingDelete?.file !== row.topic.file) {
+			this.pendingDelete = row.topic;
+			this.invalidate();
+			return;
+		}
+		this.pendingDelete = undefined;
+		const result = this.options.deleteTopic(row.topic);
+		this.notice = result.ok
+			? { text: `Deleted ${row.topic.file}`, level: "dim" }
+			: { text: `Delete failed — ${result.error}`, level: "error" };
+		this.refreshTopics();
+		this.invalidate();
+	}
+
+	/**
+	 * Enter in the detail view hands the file to the external editor (the same
+	 * Ctrl+G editor pi uses), then re-reads the file: the editor writes it behind
+	 * the overlay's back, so the rendered body would otherwise be stale.
+	 */
+	private async editSelected(): Promise<void> {
+		const detail = this.detail;
+		if (!detail || this.editing) return;
+		if (!detail.body.ok) {
+			this.notice = { text: `${detail.topic.file} — ${detail.body.error}`, level: "warning" };
+			this.invalidate();
+			return;
+		}
+		this.editing = true;
+		const file = detail.topic.file;
+		let error: string | undefined;
+		try {
+			error = await this.options.editFile(detail.topic);
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		} finally {
+			this.editing = false;
+		}
+		this.notice = error === undefined ? undefined : { text: `Editor failed — ${error}`, level: "error" };
+		this.refreshTopics(file);
+		const fresh = this.topics.find((topic) => topic.file === file);
+		if (fresh) detail.topic = fresh;
+		const body = this.options.readBody(detail.topic);
+		detail.body = body;
+		detail.bytes = body.ok ? byteLength(body.text) : 0;
+		detail.lines = [];
+		detail.linesWidth = 0;
+		this.invalidate();
+		this.options.requestRender();
+	}
+
+	/**
+	 * Swap in a fresh topic list after a mutation, keeping the cursor on
+	 * `preferredFile` when it still exists and on the nearest row when it does
+	 * not (the row that slid into the deleted one's place).
+	 */
+	private refreshTopics(preferredFile?: string): void {
+		this.topics = this.options.reloadTopics();
+		const rows = this.rows();
+		const positions = this.selectableRows(rows);
+		if (positions.length === 0) {
+			this.selectedIndex = 0;
+			this.windowStart = 0;
+			return;
+		}
+		const preferred = preferredFile === undefined
+			? -1
+			: positions.findIndex((index) => {
+				const row = rows[index];
+				return row.kind === "topic" && row.topic.file === preferredFile;
+			});
+		if (preferred >= 0) {
+			this.selectedIndex = positions[preferred];
+		} else {
+			this.selectedIndex =
+				positions.find((index) => index >= this.selectedIndex) ?? positions[positions.length - 1];
+		}
+		this.windowStart = Math.min(this.windowStart, Math.max(0, rows.length - 1));
+		this.ensureVisible(rows);
 	}
 
 	private scrollBy(delta: number): void {
@@ -294,8 +432,8 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 	private rows(): Row[] {
 		const query = this.searchInput.getValue().trim();
 		const topics = query
-			? fuzzyFilter(this.options.topics, query, topicMatchText)
-			: this.options.topics;
+			? fuzzyFilter(this.topics, query, topicMatchText)
+			: this.topics;
 		const rows: Row[] = topics
 			.filter((topic) => topic.indexed)
 			.map((topic) => ({ kind: "topic", topic }));
@@ -310,18 +448,41 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 	// === body =============================================================
 
 	private bodyHeight(): number {
-		return Math.max(1, this.overlayHeight() - CHROME_LINES);
+		return Math.max(1, this.overlayHeight() - this.chromeLines());
 	}
 
 	private overlayHeight(): number {
 		return overlayHeight(this.options.terminalRows());
 	}
 
+	/** The path row is dropped (and the body keeps its line) on a tiny terminal. */
+	private showPathRow(): boolean {
+		return this.level === "detail" && this.overlayHeight() >= DETAIL_CHROME_LINES + 1;
+	}
+
+	private chromeLines(): number {
+		return this.showPathRow() ? DETAIL_CHROME_LINES : CHROME_LINES;
+	}
+
+	private detailPathLine(contentWidth: number): string {
+		const path = this.detailPath();
+		// Keep the tail: the file name (and the project slug) is the part that
+		// distinguishes a memory; the home prefix is the part worth losing.
+		return this.options.theme.fg("dim", ` ${truncateFromStart(path, Math.max(1, contentWidth - 1))}`);
+	}
+
+	/** Absolute path of the open memory; the raw link target when it is unsafe. */
+	private detailPath(): string {
+		const detail = this.detail;
+		if (!detail) return "";
+		return resolveInside(this.options.memoryDir, detail.topic.file) ?? detail.topic.file;
+	}
+
 	private listBody(contentWidth: number, bodyHeight: number): string[] {
 		const theme = this.options.theme;
 		const rows = this.rows();
 		if (rows.length === 0) {
-			const message = this.options.topics.length === 0
+			const message = this.topics.length === 0
 				? "no memories yet"
 				: `no topic matches “${this.searchInput.getValue().trim()}”`;
 			return pad([theme.fg("muted", `  ${message}`)], bodyHeight);
@@ -356,7 +517,6 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		detail.scrollTop = clamp(detail.scrollTop, 0, maxScroll);
 		return pad(all.slice(detail.scrollTop, detail.scrollTop + bodyHeight), bodyHeight);
 	}
-
 	/** Markdown lines for the detail view, cached per width. */
 	private detailLines(contentWidth: number): string[] {
 		const detail = this.detail;
@@ -376,6 +536,7 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 	 */
 	private topicLine(topic: MemoryTopic, selected: boolean, contentWidth: number): string {
 		const theme = this.options.theme;
+		const pending = this.pendingDelete?.file === topic.file;
 		const cursor = selected ? theme.fg("accent", "› ") : "  ";
 		let meta = this.topicMeta(topic);
 		// Narrow overlay: the title wins over the meta column.
@@ -384,7 +545,11 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		const titleWidth = Math.max(1, contentWidth - CURSOR_WIDTH - metaWidth - (metaWidth > 0 ? 2 : 0));
 		// Truncate before styling: keep the width math free of ANSI nesting.
 		const clipped = truncateToWidth(topic.title, titleWidth, "…");
-		const title = selected ? theme.fg("accent", theme.bold(clipped)) : clipped;
+		const title = pending
+			? theme.fg("warning", theme.bold(clipped))
+			: selected
+				? theme.fg("accent", theme.bold(clipped))
+				: clipped;
 		const gap = Math.max(1, contentWidth - CURSOR_WIDTH - visibleWidth(title) - metaWidth);
 		return `${cursor}${title}${meta === "" ? "" : " ".repeat(gap) + meta}`;
 	}
@@ -419,9 +584,9 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 				: detail.body.error;
 			return titlePair(theme.fg("accent", theme.bold(detail.topic.title)), theme.fg("dim", right), contentWidth);
 		}
-		const orphans = this.options.topics.filter((topic) => !topic.indexed).length;
+		const orphans = this.topics.filter((topic) => !topic.indexed).length;
 		const counts = [
-			plural(this.options.topics.length - orphans, "topic"),
+			plural(this.topics.length - orphans, "topic"),
 			orphans > 0 ? `${orphans} unindexed` : "",
 		].filter(Boolean).join(" · ");
 		return titlePair(
@@ -450,16 +615,25 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 
 	private matchSummary(): string {
 		const query = this.searchInput.getValue().trim();
-		if (query === "") return plural(this.options.topics.length, "topic");
+		if (query === "") return plural(this.topics.length, "topic");
 		const matches = this.rows().filter((row) => row.kind === "topic").length;
-		return `${matches}/${this.options.topics.length} matches`;
+		return `${matches}/${this.topics.length} matches`;
 	}
 
 	private hintLine(): string {
+		const theme = this.options.theme;
+		if (this.pendingDelete !== undefined) {
+			const title = truncateToWidth(this.pendingDelete.title, 40, "…");
+			return theme.fg("warning", ` Ctrl+D again to delete “${title}” · any other key cancels`);
+		}
+		if (this.notice !== undefined) {
+			const level = this.notice.level === "dim" ? "muted" : this.notice.level;
+			return theme.fg(level, ` ${this.notice.text}`);
+		}
 		const hint = this.level === "detail"
-			? "↑↓ scroll · PgUp/PgDn page · Esc back"
-			: "↑↓ navigate · Enter open · Esc close";
-		return this.options.theme.fg("dim", ` ${hint}`);
+			? "↑↓ scroll · PgUp/PgDn page · Enter edit · Esc back"
+			: "↑↓ navigate · Enter open · Ctrl+D delete · Esc close";
+		return theme.fg("dim", ` ${hint}`);
 	}
 
 	private line(content: string, contentWidth: number): string {
@@ -506,6 +680,24 @@ export function formatAge(mtimeMs: number, nowMs: number): string {
 /** `1 topic` / `2 topics` — 0 takes the plural form. */
 function plural(count: number, word: string): string {
 	return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * Truncate path-like text from the left: `…/slug/memory.md`. The tail carries the
+ * file name, which is what identifies the memory; the home prefix is the part
+ * worth losing on a narrow overlay.
+ */
+export function truncateFromStart(text: string, width: number, ellipsis = "…"): string {
+	if (visibleWidth(text) <= width) return text;
+	const budget = Math.max(0, width - visibleWidth(ellipsis));
+	let tail = "";
+	const characters = [...text];
+	for (let index = characters.length - 1; index >= 0; index -= 1) {
+		const candidate = characters[index] + tail;
+		if (visibleWidth(candidate) > budget) break;
+		tail = candidate;
+	}
+	return ellipsis + tail;
 }
 
 /** Body lines exactly `height` long: extra lines dropped, short ones padded. */

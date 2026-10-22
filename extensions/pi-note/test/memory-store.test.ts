@@ -3,17 +3,19 @@
 // Run: cd extensions/pi-note && node --import tsx --test test/*.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	byteLength,
+	deleteTopic,
 	formatBytes,
 	listMemoryFiles,
 	loadTopics,
 	readTopicBody,
 	resolveInside,
 } from "../memory-store.ts";
+import type { MemoryTopic } from "../memory-index.ts";
 
 function withTempMemory(run: (dir: string) => void): void {
 	const dir = mkdtempSync(join(tmpdir(), "pi-note-browser-"));
@@ -134,5 +136,99 @@ test("loadTopics carries size and mtime through to the topics", () => {
 		// A missing file has no stats to show, only the missing flag.
 		assert.equal(byName.get("gone.md")?.exists, false);
 		assert.equal(byName.get("gone.md")?.size, undefined);
+	});
+});
+
+test("deleteTopic removes the file and its index line, keeping the rest intact", () => {
+	withTempMemory((dir) => {
+		const index = ["# Memory", "", "- [Keep](keep.md) — k", "- [Gone](gone.md) — g", "", "- [Tail](tail.md) — t", ""].join("\n");
+		writeFileSync(join(dir, "MEMORY.md"), index);
+		chmodSync(join(dir, "MEMORY.md"), 0o600);
+		for (const name of ["keep.md", "gone.md", "tail.md"]) writeFileSync(join(dir, name), name);
+		const topic = loadTopics(dir).find((entry) => entry.file === "gone.md");
+		assert.ok(topic);
+
+		assert.deepEqual(deleteTopic(dir, topic), { ok: true });
+		assert.equal(existsSync(join(dir, "gone.md")), false);
+		assert.equal(existsSync(join(dir, "keep.md")), true);
+		assert.equal(
+			readFileSync(join(dir, "MEMORY.md"), "utf8"),
+			["# Memory", "", "- [Keep](keep.md) — k", "", "- [Tail](tail.md) — t", ""].join("\n"),
+		);
+		// The atomic write leaves no temp file behind and keeps the index's mode.
+		assert.ok(!readdirSync(dir).some((name) => name.includes(".tmp-")));
+		assert.equal(statSync(join(dir, "MEMORY.md")).mode & 0o777, 0o600);
+	});
+});
+
+test("deleteTopic removes every duplicate index line pointing at the file", () => {
+	withTempMemory((dir) => {
+		writeFileSync(join(dir, "MEMORY.md"), "- [A](a.md) — one\n- [A again](a.md) — two\n- [B](b.md) — b\n");
+		writeFileSync(join(dir, "a.md"), "a");
+		writeFileSync(join(dir, "b.md"), "b");
+		const topic = loadTopics(dir).find((entry) => entry.file === "a.md");
+		assert.ok(topic);
+		assert.deepEqual(deleteTopic(dir, topic), { ok: true });
+		assert.equal(readFileSync(join(dir, "MEMORY.md"), "utf8"), "- [B](b.md) — b\n");
+	});
+});
+
+test("deleteTopic cleans up a stale index line whose file is already gone", () => {
+	withTempMemory((dir) => {
+		writeFileSync(join(dir, "MEMORY.md"), "- [Gone](gone.md) — stale\n- [Kept](kept.md) — k\n");
+		writeFileSync(join(dir, "kept.md"), "k");
+		const topic = loadTopics(dir).find((entry) => entry.file === "gone.md");
+		assert.ok(topic);
+		assert.equal(topic.exists, false);
+		assert.deepEqual(deleteTopic(dir, topic), { ok: true });
+		assert.equal(readFileSync(join(dir, "MEMORY.md"), "utf8"), "- [Kept](kept.md) — k\n");
+	});
+});
+
+test("deleteTopic deletes an orphan file without rewriting MEMORY.md", () => {
+	withTempMemory((dir) => {
+		const index = "# Memory\n- [Kept](kept.md) — k\n";
+		writeFileSync(join(dir, "MEMORY.md"), index);
+		writeFileSync(join(dir, "kept.md"), "k");
+		writeFileSync(join(dir, "orphan.md"), "o");
+		const topic = loadTopics(dir).find((entry) => entry.file === "orphan.md");
+		assert.ok(topic);
+		assert.equal(topic.indexed, false);
+		assert.deepEqual(deleteTopic(dir, topic), { ok: true });
+		assert.equal(existsSync(join(dir, "orphan.md")), false);
+		assert.equal(readFileSync(join(dir, "MEMORY.md"), "utf8"), index);
+	});
+});
+
+test("deleteTopic refuses an index line that escapes the memory dir", () => {
+	withTempMemory((dir) => {
+		const outside = join(dir, "..", "outside-memory.md");
+		writeFileSync(outside, "do not delete me");
+		try {
+			const topic: MemoryTopic = {
+				title: "Outside",
+				file: "../outside-memory.md",
+				hook: "",
+				indexed: true,
+				exists: true,
+			};
+			assert.deepEqual(deleteTopic(dir, topic), { ok: false, error: "unsafe path in MEMORY.md" });
+			assert.equal(existsSync(outside), true);
+		} finally {
+			rmSync(outside, { force: true });
+		}
+	});
+});
+
+test("deleteTopic handles a nested target", () => {
+	withTempMemory((dir) => {
+		mkdirSync(join(dir, "sub"));
+		writeFileSync(join(dir, "MEMORY.md"), "- [Nested](sub/n.md) — n\n");
+		writeFileSync(join(dir, "sub", "n.md"), "n");
+		const topic = loadTopics(dir).find((entry) => entry.file === "sub/n.md");
+		assert.ok(topic);
+		assert.deepEqual(deleteTopic(dir, topic), { ok: true });
+		assert.equal(existsSync(join(dir, "sub", "n.md")), false);
+		assert.equal(readFileSync(join(dir, "MEMORY.md"), "utf8"), "");
 	});
 });
