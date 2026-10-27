@@ -176,7 +176,7 @@ read / write / edit / grep / find / ls 等工具不经过 shell。插件在 `too
 
 You have a persistent file-based memory for this project at `<MEMORY_DIR>`. This directory already exists — write to it directly. Do not run mkdir and do not check whether it exists.
 
-Memory is what a future session on this project needs so it does not repeat a mistake or redo work. Each memory is one markdown file holding one topic that can be updated on its own, named `<short-kebab-case-slug>.md`, no frontmatter. Worth saving: pitfalls you hit and how to get past them (a tool's non-obvious behavior, a command that silently returns wrong results, an approach that turned out not to work); important decisions and constraints, with the why, that the code and git history do not show (convert relative dates to absolute); guidance the user has given on how you should work, with the why; who the user is (role, expertise, preferences); pointers to external resources (URLs, dashboards, tickets).
+Memory is what a future session on this project needs so it does not repeat a mistake, redo work, or work out again what has already been found. Each memory is one markdown file holding one topic that can be updated on its own, named `<short-kebab-case-slug>.md`, no frontmatter. Worth saving: pitfalls you hit and how to get past them (a tool's non-obvious behavior, a command that silently returns wrong results, an approach that turned out not to work); findings that took real effort and would otherwise have to be rediscovered (how a system or API actually behaves, where something lives, which approach works); important decisions and constraints, with the why, that the code and git history do not show (convert relative dates to absolute); guidance the user has given on how you should work, with the why; who the user is (role, expertise, preferences); pointers to external resources (URLs, dashboards, tickets).
 
 Write a memory as the conclusion — what is true, what to do or avoid, and why — not as a record of what happened. Memory is not a log: no running records, per-run results, progress notes or timelines. When a topic changes, rewrite its conclusion in place instead of appending entries. Work state that a later session has to pick up (progress, next steps) belongs in the project's own files, such as a handoff or plan document, not in memory; this session's artifacts belong in the scratchpad.
 
@@ -256,7 +256,7 @@ Before saving, check the index for an existing entry that already covers it. Upd
 
 **Given** agent 手头有本 session 的产物（脚本、中间结果、调试输出），或需要跨 session 接续的工作状态（进度、下一步、逐轮运行记录）
 **When** 它想把这些落盘
-**Then** session 产物写到 `$PI_NOTE_SCRATCHPAD_DIR/`；跨 session 的工作状态写进项目自己的文件（如 handoff / plan 文档）；都不写进记忆目录——记忆只收能让未来 session 少踩坑、少返工的结论（踩过的坑、重要决策及理由），按结论原地改写而非追加条目。
+**Then** session 产物写到 `$PI_NOTE_SCRATCHPAD_DIR/`；跨 session 的工作状态写进项目自己的文件（如 handoff / plan 文档）；都不写进记忆目录——记忆只收能让未来 session 少踩坑、少返工、免于重复探索的结论（踩过的坑、费力得到的 findings、重要决策及理由），按结论原地改写而非追加条目。
 
 ## 9. 验收标准
 
