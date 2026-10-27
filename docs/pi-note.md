@@ -176,11 +176,11 @@ read / write / edit / grep / find / ls 等工具不经过 shell。插件在 `too
 
 You have a persistent file-based memory for this project at `<MEMORY_DIR>`. This directory already exists — write to it directly. Do not run mkdir and do not check whether it exists.
 
-Each memory is one markdown file holding one topic that can be updated on its own, named `<short-kebab-case-slug>.md`, no frontmatter. Worth saving: who the user is (role, expertise, preferences); guidance the user has given on how you should work, with the why; durable project or cross-project decisions and constraints not derivable from the code or git history (convert relative dates to absolute); pointers to external resources (URLs, dashboards, tickets).
+Memory is what a future session on this project needs so it does not repeat a mistake or redo work. Each memory is one markdown file holding one topic that can be updated on its own, named `<short-kebab-case-slug>.md`, no frontmatter. Worth saving: pitfalls you hit and how to get past them (a tool's non-obvious behavior, a command that silently returns wrong results, an approach that turned out not to work); important decisions and constraints, with the why, that the code and git history do not show (convert relative dates to absolute); guidance the user has given on how you should work, with the why; who the user is (role, expertise, preferences); pointers to external resources (URLs, dashboards, tickets).
 
-Memory is for what is still true in a future session — durable facts and decisions. Anything with a shorter life — in-progress state, drafts, intermediate results, throwaway scripts, command output, logs — belongs in the scratchpad, never in memory. If you are unsure whether something outlives the current task, write it to the scratchpad.
+Write a memory as the conclusion — what is true, what to do or avoid, and why — not as a record of what happened. Memory is not a log: no running records, per-run results, progress notes or timelines. When a topic changes, rewrite its conclusion in place instead of appending entries. Work state that a later session has to pick up (progress, next steps) belongs in the project's own files, such as a handoff or plan document, not in memory; this session's artifacts belong in the scratchpad.
 
-After writing the file, add a one-line pointer in `<MEMORY_DIR>/MEMORY.md`: `- [Title](file.md) — hook`. One line per memory, never put memory content there.
+After writing the file, add a one-line pointer in `<MEMORY_DIR>/MEMORY.md`: `- [Title](file.md) — hook`, where the hook is a short phrase (under ~150 characters) saying when the memory is relevant. One line per memory, never put memory content there.
 
 Writing a memory file and updating this index are one atomic step: never create, rename, or delete a memory file without adding, fixing, or removing its `MEMORY.md` line in the same turn. A memory file with no index line is invisible to future sessions — the index snapshot is the only recall path.
 
@@ -190,7 +190,7 @@ Before saving, check the index for an existing entry that already covers it. Upd
 
 # Scratchpad
 
-`$PI_NOTE_SCRATCHPAD_DIR` is a scratch directory for this session. Use it for temporary files — intermediate results, throwaway scripts, command output that doesn't belong in the project — instead of `/tmp`, the working directory, or the memory directory. It already exists and is session-specific. Write the path literally as `$PI_NOTE_SCRATCHPAD_DIR/<file>` in any tool; it is expanded for you. Only use `/tmp` if the user explicitly asks.
+`$PI_NOTE_SCRATCHPAD_DIR` is this session's workspace for the artifacts it produces and reuses but that do not belong in the project — scripts, temporary files, intermediate results, debug output. Put any script longer than a one-liner, or one you may run more than once, in a file there instead of inline (heredoc, `python -c`, long command lines): when it needs a tweak, edit the file and run it again rather than rewriting it from scratch. Use it instead of `/tmp`, the working directory, or the memory directory. It already exists and is session-specific; it does not carry over to later sessions. Write the path literally as `$PI_NOTE_SCRATCHPAD_DIR/<file>` in any tool; it is expanded for you. Only use `/tmp` if the user explicitly asks.
 ````
 
 ## 8. User Story
@@ -227,8 +227,8 @@ Before saving, check the index for an existing entry that already covers it. Upd
 
 ### US-6：用 scratchpad 装中间产物
 
-**Given** agent 需要跑一次性脚本分析日志
-**Then** 脚本落在 `$PI_NOTE_SCRATCHPAD_DIR/` 而不是项目目录，`git status` 干净；bash 里 `ls "$PI_NOTE_SCRATCHPAD_DIR"` 可用，write 工具里 `$PI_NOTE_SCRATCHPAD_DIR/analyze.py` 可用。
+**Given** agent 需要写脚本分析日志，之后可能还要微调重跑
+**Then** 脚本以文件形式落在 `$PI_NOTE_SCRATCHPAD_DIR/` 而不是项目目录或 heredoc 内联，`git status` 干净；需要微调时 edit 该文件再跑，而不是整段重写；bash 里 `ls "$PI_NOTE_SCRATCHPAD_DIR"` 可用，write 工具里 `$PI_NOTE_SCRATCHPAD_DIR/analyze.py` 可用。
 
 ### US-7：并行 session 互不干扰
 
@@ -252,11 +252,11 @@ Before saving, check the index for an existing entry that already covers it. Upd
 **When** 输入 `/memory`
 **Then** 浮层一级列出索引里的 topic（标题 + 钩子）；输入字符即模糊过滤；回车进二级看该文件全文（markdown 渲染、可滚动）；ESC 回一级（搜索词保留），再 ESC 关闭。索引未提到的 `.md` 文件列在 `unindexed` 分组里。
 
-### US-11：临时内容不进记忆
+### US-11：流水账不进记忆
 
-**Given** agent 手头有中间结果、草稿、一次性脚本、日志这类内容
+**Given** agent 手头有本 session 的产物（脚本、中间结果、调试输出），或需要跨 session 接续的工作状态（进度、下一步、逐轮运行记录）
 **When** 它想把这些落盘
-**Then** 写到 `$PI_NOTE_SCRATCHPAD_DIR/`，不写进记忆目录——记忆只收跨会话仍成立的事实与决策；拿不准是否跨任务有效时，一律写 scratchpad。
+**Then** session 产物写到 `$PI_NOTE_SCRATCHPAD_DIR/`；跨 session 的工作状态写进项目自己的文件（如 handoff / plan 文档）；都不写进记忆目录——记忆只收能让未来 session 少踩坑、少返工的结论（踩过的坑、重要决策及理由），按结论原地改写而非追加条目。
 
 ## 9. 验收标准
 
