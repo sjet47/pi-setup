@@ -24,12 +24,13 @@ pi-note 把 Claude Code 的两个机制移植到 pi：**文件式记忆**（每�
 
 ## 2. 插件职责
 
-三个钩子 + 一个**只读**命令，**不注册任何工具**：
+三个钩子 + 一个**只读**命令，**不注册任何工具**（另有两个钩子只服务 D2.1 的轮间补报，见下）：
 
 | 钩子 / 命令 | 做什么 |
 |---|---|
-| `session_start` | 建目录；设 `process.env.PI_NOTE_SCRATCHPAD_DIR`；读一次 `MEMORY.md` 存为快照 |
-| `before_agent_start` | 把规则文本 + 索引快照追加到 `event.systemPrompt` |
+| `session_start` | 建目录；设 `process.env.PI_NOTE_SCRATCHPAD_DIR`；读一次 `MEMORY.md` 存为快照，同时作为轮间补报的基线 |
+| `before_agent_start` | 把规则文本 + 索引快照追加到 `event.systemPrompt`；轮间 `MEMORY.md` 有变化时额外注入一条隐藏 message |
+| `agent_end` | 一轮结束：取收盘基线，并确认上一轮注入的补报是否真的进了运行 |
 | `tool_call` | 非 shell 工具参数里的 `$PI_NOTE_SCRATCHPAD_DIR` 前缀替换为真实路径 |
 | `/memory` | 打开两层浮层浏览本项目记忆：一级列 `MEMORY.md` 的 topic（标题 + 钩子，支持模糊搜索），回车进二级看该文件（markdown 渲染、可滚动），ESC 回退一级 |
 
@@ -57,6 +58,22 @@ pi-note 把 Claude Code 的两个机制移植到 pi：**文件式记忆**（每�
 - 不用 `before_agent_start` 的 `message` 注入。那种消息会持久化进 session（`agent-session.js` 约 916 行），fork/resume/CLI 恢复时会堆积副本，且 compaction 可能吞掉它。system prompt 没有这些问题。
 
 已知代价：`/fork`、`/resume`、`/reload`、CLI 恢复都会触发 `session_start`，重读索引。若期间 `MEMORY.md` 变了，继承的历史缓存作废一次，即一次 prefill。低频，接受。
+
+#### D2.1：轮次之间的外部写入用一条隐藏 message 补报
+
+快照冻结的副作用：别的 agent（dsh、另一个 pi session、编辑器）在**本 session 空闲期间**写入的记忆永远不可见。补丁不改快照，只补报（`extensions/pi-note/refresh.ts`）：
+
+| 时机 | 动作 |
+|---|---|
+| `session_start` | 基线 = 进 prompt 的那份快照本身（`prepare.ts` 读取前后各 stat 一次，稳定才带回 stat） |
+| `agent_end` | 本轮结束，取收盘基线；这样本 session 自己这一轮的写入天然进入基线，不需要 tool 钩子 |
+| `before_agent_start`（下一轮） | 探测：mtime+size 快路径 → 变了才读内容算 SHA-1，digest 相同不报 |
+
+真变了就返回 `BeforeAgentStartEventResult.message`（`customType: note-memory-refresh`、`display: false`）。已核对：`runner.js` 的 `emitBeforeAgentStart` 同时接受 `systemPrompt` 与 `message`；`agent-session.js` `_prepareRun` 把它排在用户输入之后作为本轮起始消息；`interactive-mode.js` 只渲染 `entry.display` 为真的 custom_message，所以 `display: false` 在 TUI 不可见；`convertToLlm` 不看 `display`，模型照样能读到（user 角色）。
+
+D2 里「不用 message 注入」的顾虑仍然成立（消息会持久化、可能被 compaction 吞），所以只用于这个**增量补报**，不进 system prompt；代价是历史里可能出现多条补报，可接受。
+
+基线推进条件是**消息真的进了本轮运行**（`AgentEndEvent.messages` 里能找到该 `refreshId`），因此注入后被 abort/失败不会丢变更，下一轮再报一次。窗口从「上一轮结束」开始，所以本 session 自己这一轮里的写入（write/edit/bash 都算）天然落在收盘基线里、不会被报；反过来，**一轮进行中**才发生的写入（本 session、子 agent、另一个 agent 的）会被收盘基线吞掉而不报，因为无法与自身写入区分。只监视 `MEMORY.md`：只改 topic 文件不加索引行不报。开关 `memoryRefresh`（默认 true）与上限 `memoryRefreshMaxChars`（默认 16000）读 `settings.json`，读取失败一律用默认值。
 
 ### D3：规则驱动，不提供专用工具
 
@@ -186,6 +203,8 @@ Writing a memory file and updating this index are one atomic step: never create,
 
 The index is included below as a snapshot taken at session start. When a line looks relevant to the task at hand, read that file before acting on the topic; do not guess at its contents from the hook. Memories you write during this session will not appear in the snapshot; read `<MEMORY_DIR>/MEMORY.md` directly when you need the authoritative current list, and after context compaction before acting on past agreements.
 
+Changes to `<MEMORY_DIR>/MEMORY.md` made while this session is idle are announced at the start of your next turn, with the file's new content. Writes this session makes itself are not announced. Treat an announced change as a fresh read of the index: it supersedes the snapshot above.
+
 Before saving, check the index for an existing entry that already covers it. Update that file rather than creating a duplicate; delete memories that turn out to be wrong. Don't save what the repo already records (code structure, past fixes, git history, AGENTS.md) or what only matters to the current conversation; if asked to remember one of those, ask what was non-obvious about it and save that instead. Never save secrets or credentials. Memories reflect what was true when written — if one names a file, function, or flag, verify it still exists before recommending it.
 
 # Scratchpad
@@ -288,6 +307,8 @@ Before saving, check the index for an existing entry that already covers it. Upd
 - **索引解析**（`test/memory-index.test.ts`）：各种列表写法的解析、去重、外部链接忽略、`.md` 之外的未索引文件不列、缺失文件标记、嵌套 target 不误报
 - **读盘**（`test/memory-store.test.ts`）：临时目录下 `MEMORY.md` + 磁盘文件的合并；目录/索引缺失不抛；`..`、绝对路径被拒；`listMemoryFiles` 的 size/mtime、跳过目录、跟随符号链接、断链不计入（从而读作 missing）
 - **浮层**（`test/browser.test.ts`）：桩 theme/keybindings/时钟驱动，断言渲染行数恒等于 `overlayHeight`、每行宽度恒等于面板宽度（含 CJK 与元信息列）、搜索过滤、回车开二级、ESC 分层、缺失文件错误态、滚动到底 clamp、超窄宽度不抛、元信息列的显示与让位边界、`formatAge` 各档位（含 360-364 天必须是 `12mo` 而非 `0y`、时钟偏移到未来不得出现负年龄）
+- **轮间补报**（`test/refresh.test.ts`）：外部写入被报、无变化不报、`touch` 不报、本轮自身写入下一轮不报、注入未送达时基线不推进且下一轮重报、索引删除/重建、行数/行长/内容三档预算、读取不稳定跳过（注入假 `probe`）、`deliveredRefreshIds` 只认本插件的 custom message
+- **设置**（`test/settings.test.ts`）：文件缺失/JSON 坏/非对象均用默认值；只有显式 `false` 关刷新；上限类型不对回落默认
 
 ## 11. 落地清单
 

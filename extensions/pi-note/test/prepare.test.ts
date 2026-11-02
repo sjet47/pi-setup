@@ -35,6 +35,9 @@ test("first run creates memory dir, empty MEMORY.md and a 0700 scratchpad", () =
 		assert.equal(scratchStat.mode & 0o777, 0o700);
 
 		assert.equal(prepared.snapshot, ""); // empty file => no index snapshot
+		// The refresh baseline rides along: both stats around the read agreed.
+		assert.ok(prepared.stat);
+		assert.equal(prepared.stat.size, 0);
 	} finally {
 		rmSync(agentDir, { recursive: true, force: true });
 		rmSync(tmpBase, { recursive: true, force: true });
@@ -59,6 +62,12 @@ test("existing memory is picked up as the snapshot on a later start", () => {
 		// next session_start re-reads the index
 		const second = prepareSession(p.memoryDir, p.scratchDir);
 		assert.equal(second.snapshot, "- [CLI prefs](cli-preferences.md) — jq/glab\n");
+		// The stat describes the same bytes as the snapshot, so it can serve as the
+		// change-detection baseline without a second read.
+		const onDisk = statSync(p.memoryIndex, { bigint: true });
+		assert.ok(second.stat);
+		assert.equal(second.stat.mtimeNs, onDisk.mtimeNs);
+		assert.equal(second.stat.size, Number(onDisk.size));
 		statSync(p.memoryDir); // still a dir (no re-create failure)
 	} finally {
 		rmSync(agentDir, { recursive: true, force: true });

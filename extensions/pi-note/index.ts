@@ -7,18 +7,26 @@
 //   tool_call            expand the scratchpad var in non-shell tool arguments
 // Memory reads/writes are left entirely to the agent's own read/write/edit tools.
 //
+// The system-prompt snapshot is frozen for the session (that is what keeps the
+// prompt prefix cacheable), so MEMORY.md changes made by another agent while
+// this session is idle are announced out-of-band instead: `agent_end` takes a
+// closing baseline, `before_agent_start` of the next turn compares against it
+// and injects one silent custom message. See refresh.ts for the window.
+//
 // One command: `/memory` opens the browser overlay over the topics in
 // MEMORY.md (browser.ts). It reads from disk on every invocation, so it shows
 // memories written after session_start. The overlay itself only deletes (Ctrl+D
 // twice: file + index line); editing hands the real file to the external editor
 // (Enter in the detail view), so memory writes still never go through a bespoke
 // parser — the file is edited as markdown, by vim or by the agent.
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { BeforeAgentStartEventResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { SCRATCH_ENV_VAR, memoryRootLabel, resolvePaths } from "./paths.ts";
 import { memoryRootFor } from "./git-root.ts";
 import { prepareSession } from "./prepare.ts";
 import { buildPromptAppend } from "./prompt.ts";
+import { baselineFromSnapshot, deliveredRefreshIds, MEMORY_REFRESH_CUSTOM_TYPE, MemoryRefreshTracker } from "./refresh.ts";
+import { readNoteSettings } from "./settings.ts";
 import { expandInputStrings } from "./expand.ts";
 import { deleteTopic, loadTopics, readTopicBody, resolveInside } from "./memory-store.ts";
 import { editFileInEditor, readExternalEditorSetting, resolveEditorCommand } from "./editor.ts";
@@ -33,6 +41,9 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 	let memoryRoot = "";
 	let scratchDir = "";
 	let snapshot = "";
+	// Turn-window tracker for MEMORY.md changes made while this session is idle.
+	// Undefined when `memoryRefresh` is off or the session is not initialized.
+	let refresh: MemoryRefreshTracker | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
 		try {
@@ -45,6 +56,18 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 			memoryRoot = root;
 			scratchDir = paths.scratchDir;
 			snapshot = prepared.snapshot;
+			// The baseline is the snapshot itself, not a second read: the model gets
+			// `prepared.snapshot`, so anything that differs afterwards is a real
+			// change. `prepared.stat` is absent when the file moved under the read —
+			// then the digest alone identifies it and the next probe re-reads.
+			const settings = readNoteSettings(getAgentDir());
+			refresh = settings.memoryRefresh
+				? new MemoryRefreshTracker({
+						indexPath: paths.memoryIndex,
+						baseline: baselineFromSnapshot(prepared.snapshot, prepared.stat),
+						maxChars: settings.memoryRefreshMaxChars,
+					})
+				: undefined;
 			// D1: scratchpad goes through the environment. bash resolves
 			// process.env on every spawn, so this is enough — no bash override.
 			process.env[SCRATCH_ENV_VAR] = scratchDir;
@@ -59,6 +82,7 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 			memoryRoot = "";
 			scratchDir = "";
 			snapshot = "";
+			refresh = undefined;
 			delete process.env[SCRATCH_ENV_VAR]; // never leave a stale path behind
 			ctx.ui.notify(
 				`pi-note init failed — memory/scratchpad disabled: ${err instanceof Error ? err.message : String(err)}`,
@@ -73,7 +97,37 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 		// changes do not accumulate, so re-append each round. The appended
 		// block is byte-identical for the whole session (snapshot is frozen at
 		// session_start), preserving pi's prompt-prefix caching.
-		return { systemPrompt: event.systemPrompt + buildPromptAppend(memoryDir, snapshot) };
+		const result: BeforeAgentStartEventResult = {
+			systemPrompt: event.systemPrompt + buildPromptAppend(memoryDir, snapshot),
+		};
+		// Start of a turn: the idle window is over, so a MEMORY.md change another
+		// agent made in it is announced now. `display: false` keeps it out of the
+		// UI (interactive-mode only renders custom entries with `display`), while
+		// pi still logs it as a `custom_message` the model reads. Together with the
+		// system prompt both fields are honoured (runner.ts emitBeforeAgentStart).
+		const announcement = refresh?.beginTurn();
+		if (announcement !== undefined) {
+			result.message = {
+				customType: MEMORY_REFRESH_CUSTOM_TYPE,
+				content: announcement.text,
+				display: false,
+				details: { refreshId: announcement.refreshId },
+			};
+		}
+		return result;
+	});
+
+	pi.on("agent_end", (event) => {
+		// A turn is over. The announcement that reached this run is adopted as the
+		// new baseline; one that never made it into `event.messages` (an abort
+		// between the injection and the loop, a throwing handler) is NOT, so the
+		// change is announced again next turn instead of being lost. With nothing
+		// outstanding this also takes the closing baseline, which is what hides
+		// this session's own writes from itself on the next turn.
+		// (`AgentEndEvent.messages` is the run's new messages and the injected
+		// custom message is its first entry, so presence here proves delivery and
+		// thereby persistence — message_end appends the entry before agent_end.)
+		refresh?.endTurn(deliveredRefreshIds(event.messages));
 	});
 
 	pi.registerCommand("memory", {

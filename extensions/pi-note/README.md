@@ -3,13 +3,14 @@
 Project-level **file-based memory** + a per-session **scratchpad dir** for pi,
 ported from Claude Code's two mechanisms. Full behavioral spec: `../../docs/pi-note.md`.
 
-Three hooks and one command — nothing appears in the UI unless you run
+Four hooks and one command — nothing appears in the UI unless you run
 `/memory` or memory init fails (one error notify).
 
 | Hook | What it does |
 |---|---|
 | `session_start` | create dirs, set `PI_NOTE_SCRATCHPAD_DIR`, snapshot `MEMORY.md` into memory |
-| `before_agent_start` | append the rules text + the frozen `MEMORY.md` index snapshot to the system prompt |
+| `before_agent_start` | append the rules text + the frozen `MEMORY.md` index snapshot to the system prompt; announce a `MEMORY.md` change made while idle |
+| `agent_end` | take the closing `MEMORY.md` baseline and settle a pending announcement |
 | `tool_call` | rewrite a leading `$PI_NOTE_SCRATCHPAD_DIR` / `${PI_NOTE_SCRATCHPAD_DIR}` prefix in non-shell tool arguments |
 
 The agent reads and writes memories itself with its built-in `read`/`write`/
@@ -68,6 +69,58 @@ every invocation, so memories written after `session_start` show up immediately
   stale (`missing`) rows all work; the index is rewritten atomically. A failed
   delete is reported and changes nothing.
 
+## MEMORY.md refresh — changes made between turns
+
+The frozen snapshot has one consequence: a memory another agent (dsh, another
+pi session, your editor) writes mid-session would stay invisible. The plugin
+closes that gap without giving up the stable prompt prefix.
+
+The window is **the end of the previous turn to the start of the next one**:
+
+1. `agent_end` takes a baseline of `MEMORY.md` (and `session_start` does, from
+the very bytes the model was given);
+2. `before_agent_start` of the next turn probes it — `stat` first, so an
+unchanged mtime/size means no read at all;
+3. once the metadata moved, the content digest decides: a `touch`, or a
+byte-identical save by an editor, announces nothing;
+4. a real change enters the turn as one hidden message (`customType`
+`note-memory-refresh`, `display: false`): it names the file, lists the index
+lines that appeared or disappeared, and carries the new index (capped at
+`memoryRefreshMaxChars`). `display: false` hides it from the transcript, but it
+is a normal user-role message in the payload, so the model reads it.
+
+Because the window starts *after* a turn, everything this session writes during
+its own turn is already in the closing baseline — no tool hooks, and no echo of
+the agent's own writes. The flip side: a write that lands **during** a turn
+(this session's, a subagent's, or another agent's) is folded into that closing
+baseline and is not announced, because nothing distinguishes it from the
+session's own work.
+
+The baseline only advances for an announcement that provably reached the run
+(the custom message is in the finished run's messages), so an abort between the
+injection and the loop announces the change again next turn instead of losing
+it. A read that races a write (`stat` before and after disagree) is skipped and
+retried next turn rather than adopted half-read.
+
+Known blind spots:
+
+1. only `MEMORY.md` is watched; editing a topic file without an index line
+   announces nothing;
+2. the fast path hides a rewrite that preserves both mtime and size (`cp -p`,
+   `git checkout` of a file whose stat matches). That is what keeps the check to
+   one `stat` per turn;
+3. compaction may drop an announcement like any other message; the rules text
+   already tells the agent to read `MEMORY.md` directly after compaction.
+
+Configured from `settings.json`, read at `session_start` (so `/reload` picks up
+a change). Both fall back to the default on any read failure, and only an
+explicit `false` turns the refresh off:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `memoryRefresh` | `true` | Announce `MEMORY.md` changes made between turns |
+| `memoryRefreshMaxChars` | `16000` | Cap on the index content copied into one announcement |
+
 ## Directory layout
 
 ```
@@ -115,7 +168,9 @@ plugin's store) — pi-note neither reads, writes, nor migrates it.
 
 Remove `"./extensions/pi-note/index.ts"` from the top-level `package.json`
 `pi.extensions` list (or filter it out in `settings.json`, see the setup
-README). There is no per-session toggle.
+README). There is no per-session toggle; the closest thing is
+`"memoryRefresh": false`, which keeps the memory snapshot but stops the
+between-turn announcements.
 
 ## Environment
 
