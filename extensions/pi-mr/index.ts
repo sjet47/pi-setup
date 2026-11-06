@@ -14,13 +14,19 @@ import {
 	ciFromGitlabCommit,
 	detectForge,
 	GITHUB_PR_FIELDS,
+	GITHUB_REPO_FIELDS,
+	githubRepoInfo,
 	gitlabApiPath,
 	gitlabCommitPath,
+	GITLAB_PROJECT_PATH,
+	gitlabRepoInfo,
 	normalizeGithub,
 	normalizeGitlab,
 	parseRemoteUrls,
+	type CheckoutInfo,
 	type Forge,
 	type MrInfo,
+	type RepoInfo,
 } from "./forge.ts";
 import { renderMrLine, type ColorRole } from "./format.ts";
 
@@ -47,6 +53,8 @@ interface SessionState {
 	/** Branch the displayed request belongs to; undefined before the first lookup. */
 	branch?: string;
 	shown?: MrInfo;
+	/** Repository-level facts for the request filters; empty when the probe failed. */
+	repoInfo: RepoInfo;
 	lastAttempt: number;
 	nextAttempt: number;
 	renderKey?: string;
@@ -78,6 +86,26 @@ export default function piMrExtension(pi: ExtensionAPI): void {
 		return branch === "" || branch === "HEAD" ? undefined : branch;
 	}
 
+	/**
+	 * Ask the forge for the two repository-level facts a by-branch lookup cannot
+	 * express: the default branch and, on GitHub, which repository `gh` resolved
+	 * to. Best effort — a failed probe only costs the default-branch suppression
+	 * and the fork filter, so the request itself is still shown.
+	 */
+	async function describeRepository(s: SessionState, forge: Forge): Promise<RepoInfo> {
+		try {
+			if (forge === "gitlab") {
+				const res = await pi.exec("glab", ["api", GITLAB_PROJECT_PATH], { cwd: s.cwd, timeout: CLI_TIMEOUT_MS });
+				return res.code === 0 ? gitlabRepoInfo(parseJson(res.stdout)) : {};
+			}
+			const res = await pi.exec("gh", ["repo", "view", "--json", GITHUB_REPO_FIELDS], { cwd: s.cwd, timeout: CLI_TIMEOUT_MS });
+			return res.code === 0 ? githubRepoInfo(parseJson(res.stdout)) : {};
+		} catch {
+			// Missing CLI, logged-out host or no repository: keep the old behaviour.
+			return {};
+		}
+	}
+
 	async function resolveForge(s: SessionState): Promise<Forge | undefined> {
 		if (s.forgeResolved) return s.forge;
 		s.forgeResolved = true;
@@ -90,24 +118,25 @@ export default function piMrExtension(pi: ExtensionAPI): void {
 		} catch {
 			// Not a git repo (or no git binary): nothing to show.
 		}
+		if (s.forge) s.repoInfo = await describeRepository(s, s.forge);
 		return s.forge;
 	}
 
-	async function queryForge(s: SessionState, forge: Forge, branch: string): Promise<MrInfo | undefined> {
+	async function queryForge(s: SessionState, forge: Forge, checkout: CheckoutInfo): Promise<MrInfo | undefined> {
 		if (forge === "gitlab") {
-			const res = await pi.exec("glab", ["api", gitlabApiPath(branch)], { cwd: s.cwd, timeout: CLI_TIMEOUT_MS });
+			const res = await pi.exec("glab", ["api", gitlabApiPath(checkout.branch)], { cwd: s.cwd, timeout: CLI_TIMEOUT_MS });
 			if (res.code !== 0) throw new Error(res.stderr.trim() || `glab exited ${res.code}`);
-			const info = normalizeGitlab(parseJson(res.stdout));
+			const info = normalizeGitlab(parseJson(res.stdout), checkout);
 			if (info && info.ci === "none" && info.sha) await fillGitlabCi(s, info);
 			return info;
 		}
 		const res = await pi.exec(
 			"gh",
-			["pr", "list", "--head", branch, "--state", "all", "--limit", "5", "--json", GITHUB_PR_FIELDS],
+			["pr", "list", "--head", checkout.branch, "--state", "all", "--limit", "5", "--json", GITHUB_PR_FIELDS],
 			{ cwd: s.cwd, timeout: CLI_TIMEOUT_MS },
 		);
 		if (res.code !== 0) throw new Error(res.stderr.trim() || `gh exited ${res.code}`);
-		return normalizeGithub(parseJson(res.stdout));
+		return normalizeGithub(parseJson(res.stdout), checkout);
 	}
 
 	/**
@@ -166,7 +195,8 @@ export default function piMrExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			try {
-				const info = await queryForge(s, forge, branch);
+				const checkout: CheckoutInfo = { branch, defaultBranch: s.repoInfo.defaultBranch, repo: s.repoInfo.repo };
+				const info = await queryForge(s, forge, checkout);
 				s.branch = branch;
 				s.shown = info;
 				s.nextAttempt = 0;
@@ -191,7 +221,7 @@ export default function piMrExtension(pi: ExtensionAPI): void {
 			state = undefined;
 			return;
 		}
-		const s: SessionState = { ctx, cwd: ctx.cwd, forgeResolved: false, lastAttempt: 0, nextAttempt: 0 };
+		const s: SessionState = { ctx, cwd: ctx.cwd, forgeResolved: false, repoInfo: {}, lastAttempt: 0, nextAttempt: 0 };
 		state = s;
 		timer = setInterval(() => void tick(s), BRANCH_POLL_MS);
 		void tick(s);

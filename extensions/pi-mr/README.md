@@ -21,8 +21,10 @@ on the line directly above.
 | 5 | title | request title, truncated by pi to the terminal width |
 
 Nothing is shown — no placeholder — when the directory is not a git repo, the
-branch has no request, the HEAD is detached, no forge remote exists, or the CLI
-fails. Stale data is never shown; a failed lookup clears the line and backs off.
+branch has no request, the only request comes from a fork, the request was
+merged/closed on the default branch, the HEAD is detached, no forge remote
+exists, or the CLI fails. Stale data is never shown; a failed lookup clears the
+line and backs off.
 
 ## Position on the status line
 
@@ -40,16 +42,37 @@ the Σ runtime from `pi-execution-time` (`zz-execution-time-total`):
 2. The forge is resolved from the remote URLs once per session: any non-GitHub
    host means `glab` (self-hosted GitLab included); only an all-GitHub remote set
    means `gh`. This is why a repo that mirrors to GitHub with a corporate
-   GitLab `glab` remote resolves to GitLab.
+   GitLab `glab` remote resolves to GitLab. The same lookup fetches the
+   repository-level facts the filters below need — best effort, so a failure
+   only falls back to the old, unfiltered behaviour:
+
+   | Forge | Command |
+   |-------|---------|
+   | GitLab | `glab api 'projects/:fullpath'` → `default_branch` |
+   | GitHub | `gh repo view --json nameWithOwner,defaultBranchRef` |
 3. The request is queried when the branch changes or every 60s (20s CLI timeout):
 
    | Forge | Command |
    |-------|---------|
    | GitLab | `glab api 'projects/:fullpath/merge_requests?state=all&source_branch=<branch>&order_by=updated_at&sort=desc'` |
-   | GitHub | `gh pr list --head <branch> --state all --limit 5 --json number,title,state,isDraft,statusCheckRollup,url` |
+   | GitHub | `gh pr list --head <branch> --state all --limit 5 --json number,title,state,isDraft,statusCheckRollup,url,headRepository` |
 
    GitLab selection: newest open request, else newest of any state. GitHub
    selection: same rule over `gh`'s output.
+
+   Two repository-level rules keep look-alike requests out:
+
+   - **Forked source**: a request whose source is another repository is dropped
+     before selection. `master` is a popular branch name, so forks open PRs/MRs
+     against this repository from their own `master`; that branch says nothing
+     about this checkout. GitLab compares `source_project_id` with
+     `target_project_id`, GitHub compares `headRepository.nameWithOwner` with the
+     repository `gh` resolved to (case-insensitive). A missing id, a deleted fork
+     or an unknown local repository keeps the request.
+   - **History on the default branch**: when HEAD is on the default branch, a
+     merged or closed request is not shown — an old `master → master` sync would
+     otherwise sit in the footer forever. On any other branch a merged request
+     stays visible, because that is where the branch tip landed.
 4. GitLab CI fallback: `head_pipeline` can be null (self-hosted instances leave it
    empty), so a second call reads the head commit's `last_pipeline`:
 
@@ -69,6 +92,6 @@ pi install git:github.com/sjet47/pi-setup
 Requirements: `git`, plus `glab` (GitLab) and/or `gh` (GitHub) logged in.
 
 Run the tests with `npm run test:mr` from the repository root. They cover URL
-parsing, forge detection, payload normalization and CI mapping — no I/O. Payload
-shapes were verified against a GitLab MR without `head_pipeline`
-(`!31681`, 2026-10-21) and `gh pr list` output.
+parsing, forge detection, payload normalization, the fork/default-branch filters
+and CI mapping — no I/O. Payload shapes were verified against a GitLab MR without
+`head_pipeline` (`!31681`, 2026-10-21) and `gh pr list` output.

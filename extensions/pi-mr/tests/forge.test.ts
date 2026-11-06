@@ -9,6 +9,8 @@ import {
 	gitlabApiPath,
 	gitlabCommitPath,
 	ciFromGitlabCommit,
+	githubRepoInfo,
+	gitlabRepoInfo,
 	normalizeGithub,
 	normalizeGitlab,
 	parseRemoteUrls,
@@ -195,4 +197,70 @@ test("ciFromGitlabCommit: prefers last_pipeline, falls back to commit status", (
 test("normalizeGitlab: carries the head sha for the CI fallback", () => {
 	assert.equal(normalizeGitlab([gitlabMr({ sha: "abc123" })])?.sha, "abc123");
 	assert.equal(normalizeGitlab([gitlabMr({ sha: "" })])?.sha, undefined);
+});
+
+test("gitlabRepoInfo: the project's default branch, or nothing", () => {
+	assert.deepEqual(gitlabRepoInfo({ default_branch: "master" }), { defaultBranch: "master" });
+	assert.deepEqual(gitlabRepoInfo({ default_branch: "" }), {});
+	assert.deepEqual(gitlabRepoInfo({ default_branch: null }), {});
+	assert.deepEqual(gitlabRepoInfo(undefined), {});
+});
+
+test("githubRepoInfo: owner/name and default branch, each optional", () => {
+	assert.deepEqual(githubRepoInfo({ nameWithOwner: "V4bel/dirtyfrag", defaultBranchRef: { name: "master" } }), {
+		repo: "V4bel/dirtyfrag",
+		defaultBranch: "master",
+	});
+	assert.deepEqual(githubRepoInfo({ nameWithOwner: "V4bel/dirtyfrag", defaultBranchRef: null }), { repo: "V4bel/dirtyfrag" });
+	assert.deepEqual(githubRepoInfo({ defaultBranchRef: { name: "main" } }), { defaultBranch: "main" });
+	assert.deepEqual(githubRepoInfo(null), {});
+});
+
+test("normalizeGitlab: a merged request on the default branch is history, not the branch's work", () => {
+	const onDefault = { branch: "master", defaultBranch: "master" };
+	assert.equal(normalizeGitlab([gitlabMr({ state: "merged" })], onDefault), undefined);
+	assert.equal(normalizeGitlab([gitlabMr({ state: "closed" })], onDefault), undefined);
+	// An open request on the default branch still belongs to it.
+	assert.equal(normalizeGitlab([gitlabMr()], onDefault)?.ref, "!1234");
+	// Off the default branch a merged request is where the branch tip landed.
+	const feature = { branch: "slh/feat/upgrade-skillhub-v0.2.22", defaultBranch: "master" };
+	assert.equal(normalizeGitlab([gitlabMr({ state: "merged" })], feature)?.state, "merged");
+	// Unknown default branch, or no checkout at all: old behaviour.
+	assert.equal(normalizeGitlab([gitlabMr({ state: "merged" })], { branch: "master" })?.state, "merged");
+	assert.equal(normalizeGitlab([gitlabMr({ state: "merged" })])?.state, "merged");
+});
+
+test("normalizeGitlab: drops merge requests whose source is another project", () => {
+	const own = (overrides: Record<string, unknown> = {}) => gitlabMr({ source_project_id: 1, target_project_id: 1, ...overrides });
+	// A fork's open request is newer, but it says nothing about this checkout.
+	const fork = own({ iid: 1695, source_project_id: 2, title: "fork" });
+	assert.equal(normalizeGitlab([fork, own({ iid: 1694, state: "merged" })], { branch: "master" })?.ref, "!1694");
+	assert.equal(normalizeGitlab([fork], { branch: "master" }), undefined);
+	// Missing ids prove nothing (old payloads, deleted forks): keep the request.
+	assert.equal(normalizeGitlab([gitlabMr({ state: "merged" })], { branch: "master" })?.ref, "!1234");
+	assert.equal(normalizeGitlab([gitlabMr({ source_project_id: "1", target_project_id: 1 })])?.ref, "!1234");
+});
+
+test("normalizeGithub: drops pull requests whose head repository is a fork", () => {
+	const checkout = { branch: "master", repo: "V4bel/dirtyfrag" };
+	const pr = (number: number, nameWithOwner: unknown) => githubPr({ number, headRepository: { nameWithOwner } });
+	assert.equal(normalizeGithub([pr(80, "Bode512/dirtyfrag")], checkout), undefined);
+	// Matched case-insensitively; the same repository is kept.
+	assert.equal(normalizeGithub([pr(80, "v4bel/DIRTYFRAG")], checkout)?.ref, "#80");
+	assert.equal(normalizeGithub([pr(81, "Bode512/dirtyfrag"), pr(80, "V4bel/dirtyfrag")], checkout)?.ref, "#80");
+	// A deleted fork leaves no head repository, and an unknown local repo has
+	// nothing to compare against: both keep the request.
+	assert.equal(normalizeGithub([githubPr({ number: 80, headRepository: null })], checkout)?.ref, "#80");
+	assert.equal(normalizeGithub([githubPr({ number: 80 })], checkout)?.ref, "#80");
+	assert.equal(normalizeGithub([pr(80, "Bode512/dirtyfrag")], { branch: "master" })?.ref, "#80");
+	assert.equal(normalizeGithub([pr(80, "Bode512/dirtyfrag")])?.ref, "#80");
+});
+
+test("normalizeGithub: hides merged/closed only on the default branch", () => {
+	const onDefault = { branch: "main", defaultBranch: "main" };
+	assert.equal(normalizeGithub([githubPr({ state: "MERGED" })], onDefault), undefined);
+	assert.equal(normalizeGithub([githubPr({ state: "CLOSED" })], onDefault), undefined);
+	assert.equal(normalizeGithub([githubPr()], onDefault)?.state, "opened");
+	assert.equal(normalizeGithub([githubPr({ state: "MERGED" })], { branch: "feat/x", defaultBranch: "main" })?.state, "merged");
+	assert.equal(normalizeGithub([githubPr({ state: "MERGED" })], { branch: "main" })?.state, "merged");
 });

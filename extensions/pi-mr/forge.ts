@@ -96,7 +96,13 @@ export function gitlabApiPath(branch: string): string {
 }
 
 /** `gh pr list --json` fields. Keep in sync with `normalizeGithub`. */
-export const GITHUB_PR_FIELDS = "number,title,state,isDraft,statusCheckRollup,url";
+export const GITHUB_PR_FIELDS = "number,title,state,isDraft,statusCheckRollup,url,headRepository";
+
+/** `glab api` path for the project itself. Used for its default branch. */
+export const GITLAB_PROJECT_PATH = "projects/:fullpath";
+
+/** `gh repo view --json` fields. Keep in sync with `githubRepoInfo`. */
+export const GITHUB_REPO_FIELDS = "nameWithOwner,defaultBranchRef";
 
 /**
  * `glab api` path for one commit. Used as the CI fallback: self-hosted GitLab
@@ -114,6 +120,45 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * What the local checkout knows about itself. A by-branch lookup cannot express
+ * the two repository-level facts needed to reject look-alike requests, so they
+ * are probed once per working directory (see `gitlabRepoInfo`/`githubRepoInfo`).
+ */
+export interface CheckoutInfo {
+	/** Branch HEAD is on. */
+	branch: string;
+	/** The repository's default branch, when the forge reports one. */
+	defaultBranch?: string;
+	/** `owner/name` of the GitHub repository the CLI resolves to. */
+	repo?: string;
+}
+
+/** Repository-level facts; every field is absent when the probe failed. */
+export interface RepoInfo {
+	defaultBranch?: string;
+	repo?: string;
+}
+
+/** `glab api projects/:fullpath` → the project's default branch. */
+export function gitlabRepoInfo(payload: unknown): RepoInfo {
+	if (!isRecord(payload)) return {};
+	const branch = payload.default_branch;
+	return typeof branch === "string" && branch !== "" ? { defaultBranch: branch } : {};
+}
+
+/** `gh repo view --json nameWithOwner,defaultBranchRef` → repo identity and default branch. */
+export function githubRepoInfo(payload: unknown): RepoInfo {
+	if (!isRecord(payload)) return {};
+	const info: RepoInfo = {};
+	if (typeof payload.nameWithOwner === "string" && payload.nameWithOwner !== "") {
+		info.repo = payload.nameWithOwner;
+	}
+	const ref = isRecord(payload.defaultBranchRef) ? payload.defaultBranchRef : undefined;
+	if (typeof ref?.name === "string" && ref.name !== "") info.defaultBranch = ref.name;
+	return info;
+}
+
+/**
  * Choose the request to display: the newest open one, else the newest of any
  * state (the API returns `updated_at`-descending order). GitLab says `opened`,
  * GitHub says `OPEN`.
@@ -122,9 +167,46 @@ function pickNewest(list: Record<string, unknown>[], stateKey: string): Record<s
 	return list.find((item) => /^open(ed)?$/i.test(String(item[stateKey] ?? ""))) ?? list[0];
 }
 
-export function normalizeGitlab(payload: unknown): MrInfo | undefined {
+/**
+ * Keep requests whose source is this repository. A fork that happens to use the
+ * same branch name (`master` is a popular one) opens requests against this
+ * project too, but its branch says nothing about this checkout.
+ *
+ * Unknown proves nothing: an old GitLab payload without the ids, or a PR whose
+ * head repository was deleted with the fork, is kept.
+ */
+function fromThisGitlabProject(mr: Record<string, unknown>): boolean {
+	const source = mr.source_project_id;
+	const target = mr.target_project_id;
+	if (typeof source !== "number" || typeof target !== "number") return true;
+	return source === target;
+}
+
+function fromThisGithubRepo(pr: Record<string, unknown>, repo: string | undefined): boolean {
+	if (repo === undefined) return true;
+	const head = isRecord(pr.headRepository) ? pr.headRepository : undefined;
+	const name = typeof head?.nameWithOwner === "string" ? head.nameWithOwner : undefined;
+	if (name === undefined) return true;
+	return name.toLowerCase() === repo.toLowerCase();
+}
+
+/**
+ * Whether the picked request is history rather than the current work.
+ *
+ * On the default branch the branch *is* the release line: a `merged` request
+ * whose source is `master` is an old sync (they happen), and a `closed` one is a
+ * dead promotion — neither describes this checkout. Off the default branch a
+ * merged request is exactly where the branch tip landed, so it stays visible.
+ */
+function hidesOnDefaultBranch(state: MrState, checkout: CheckoutInfo | undefined): boolean {
+	if (checkout?.defaultBranch === undefined) return false;
+	if (checkout.branch !== checkout.defaultBranch) return false;
+	return state === "merged" || state === "closed";
+}
+
+export function normalizeGitlab(payload: unknown, checkout?: CheckoutInfo): MrInfo | undefined {
 	if (!Array.isArray(payload)) return undefined;
-	const list = payload.filter(isRecord).filter((item) => typeof item.iid === "number");
+	const list = payload.filter(isRecord).filter((item) => typeof item.iid === "number").filter(fromThisGitlabProject);
 	if (list.length === 0) return undefined;
 	const mr = pickNewest(list, "state");
 	if (!mr) return undefined;
@@ -132,6 +214,7 @@ export function normalizeGitlab(payload: unknown): MrInfo | undefined {
 	const rawState = String(mr.state ?? "").toLowerCase();
 	const state: MrState =
 		rawState === "opened" ? (mr.draft === true ? "draft" : "opened") : rawState === "merged" ? "merged" : "closed";
+	if (hidesOnDefaultBranch(state, checkout)) return undefined;
 	const pipeline = isRecord(mr.head_pipeline) ? mr.head_pipeline : undefined;
 
 	return {
@@ -179,8 +262,12 @@ export function ciFromGitlabCommit(payload: unknown): CiState {
 	return ciFromGitlab(pipeline ? pipeline.status : payload.status);
 }
 
-export function normalizeGithub(payload: unknown): MrInfo | undefined {	if (!Array.isArray(payload)) return undefined;
-	const list = payload.filter(isRecord).filter((item) => typeof item.number === "number");
+export function normalizeGithub(payload: unknown, checkout?: CheckoutInfo): MrInfo | undefined {
+	if (!Array.isArray(payload)) return undefined;
+	const list = payload
+		.filter(isRecord)
+		.filter((item) => typeof item.number === "number")
+		.filter((item) => fromThisGithubRepo(item, checkout?.repo));
 	if (list.length === 0) return undefined;
 	const pr = pickNewest(list, "state");
 	if (!pr) return undefined;
@@ -188,6 +275,7 @@ export function normalizeGithub(payload: unknown): MrInfo | undefined {	if (!Arr
 	const rawState = String(pr.state ?? "").toUpperCase();
 	const state: MrState =
 		rawState === "OPEN" ? (pr.isDraft === true ? "draft" : "opened") : rawState === "MERGED" ? "merged" : "closed";
+	if (hidesOnDefaultBranch(state, checkout)) return undefined;
 
 	return {
 		forge: "github",
