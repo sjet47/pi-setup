@@ -15,6 +15,8 @@ import {
 	detectForge,
 	GITHUB_PR_FIELDS,
 	GITHUB_REPO_FIELDS,
+	githubLogin,
+	githubRemoteRepos,
 	githubRepoInfo,
 	gitlabApiPath,
 	gitlabCommitPath,
@@ -45,6 +47,12 @@ const RETRY_MS = 5 * 60_000;
 const GIT_TIMEOUT_MS = 5_000;
 const CLI_TIMEOUT_MS = 20_000;
 
+/** Facts about the checkout that a by-branch request lookup cannot carry. */
+interface RepositoryFacts extends RepoInfo {
+	/** `owner/name` of every GitHub remote, lowercased. */
+	repos?: string[];
+}
+
 interface SessionState {
 	ctx: ExtensionContext;
 	cwd: string;
@@ -54,7 +62,7 @@ interface SessionState {
 	branch?: string;
 	shown?: MrInfo;
 	/** Repository-level facts for the request filters; empty when the probe failed. */
-	repoInfo: RepoInfo;
+	repoInfo: RepositoryFacts;
 	lastAttempt: number;
 	nextAttempt: number;
 	renderKey?: string;
@@ -87,38 +95,52 @@ export default function piMrExtension(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * Ask the forge for the two repository-level facts a by-branch lookup cannot
-	 * express: the default branch and, on GitHub, which repository `gh` resolved
-	 * to. Best effort — a failed probe only costs the default-branch suppression
-	 * and the fork filter, so the request itself is still shown.
+	 * Probe the repository-level facts a by-branch lookup cannot express: the
+	 * default branch, and on GitHub which repositories this checkout may push to.
+	 * Best effort — an unanswered probe only costs the suppression rules, so the
+	 * request itself is still shown.
 	 */
-	async function describeRepository(s: SessionState, forge: Forge): Promise<RepoInfo> {
+	async function describeRepository(s: SessionState, forge: Forge, urls: string[]): Promise<RepositoryFacts> {
 		try {
 			if (forge === "gitlab") {
 				const res = await pi.exec("glab", ["api", GITLAB_PROJECT_PATH], { cwd: s.cwd, timeout: CLI_TIMEOUT_MS });
 				return res.code === 0 ? gitlabRepoInfo(parseJson(res.stdout)) : {};
 			}
-			const res = await pi.exec("gh", ["repo", "view", "--json", GITHUB_REPO_FIELDS], { cwd: s.cwd, timeout: CLI_TIMEOUT_MS });
-			return res.code === 0 ? githubRepoInfo(parseJson(res.stdout)) : {};
+			const [repoRes, loginRes] = await Promise.all([
+				pi.exec("gh", ["repo", "view", "--json", GITHUB_REPO_FIELDS], { cwd: s.cwd, timeout: CLI_TIMEOUT_MS }),
+				// A local config read, so it costs a fork of the process rather than a
+				// network round trip. The login is how an own-fork pull request is told
+				// apart from a stranger's fork of the same branch name.
+				pi.exec("gh", ["config", "get", "-h", "github.com", "user"], { cwd: s.cwd, timeout: GIT_TIMEOUT_MS }),
+			]);
+			return {
+				repos: githubRemoteRepos(urls),
+				...(repoRes.code === 0 ? githubRepoInfo(parseJson(repoRes.stdout)) : {}),
+				...(loginRes.code === 0 ? { login: githubLogin(loginRes.stdout) } : {}),
+			};
 		} catch {
 			// Missing CLI, logged-out host or no repository: keep the old behaviour.
-			return {};
+			return { repos: githubRemoteRepos(urls) };
 		}
 	}
 
 	async function resolveForge(s: SessionState): Promise<Forge | undefined> {
 		if (s.forgeResolved) return s.forge;
 		s.forgeResolved = true;
+		let urls: string[] = [];
 		try {
 			const res = await pi.exec("git", ["config", "--get-regexp", "^remote\\..*\\.url$"], {
 				cwd: s.cwd,
 				timeout: GIT_TIMEOUT_MS,
 			});
-			if (res.code === 0) s.forge = detectForge(parseRemoteUrls(res.stdout));
+			if (res.code === 0) {
+				urls = parseRemoteUrls(res.stdout);
+				s.forge = detectForge(urls);
+			}
 		} catch {
 			// Not a git repo (or no git binary): nothing to show.
 		}
-		if (s.forge) s.repoInfo = await describeRepository(s, s.forge);
+		if (s.forge) s.repoInfo = await describeRepository(s, s.forge, urls);
 		return s.forge;
 	}
 
@@ -195,7 +217,12 @@ export default function piMrExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			try {
-				const checkout: CheckoutInfo = { branch, defaultBranch: s.repoInfo.defaultBranch, repo: s.repoInfo.repo };
+				const checkout: CheckoutInfo = {
+					branch,
+					defaultBranch: s.repoInfo.defaultBranch,
+					repos: s.repoInfo.repos,
+					login: s.repoInfo.login,
+				};
 				const info = await queryForge(s, forge, checkout);
 				s.branch = branch;
 				s.shown = info;

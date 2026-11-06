@@ -21,8 +21,8 @@ on the line directly above.
 | 5 | title | request title, truncated by pi to the terminal width |
 
 Nothing is shown — no placeholder — when the directory is not a git repo, the
-branch has no request, the only request comes from a fork, the request was
-merged/closed on the default branch, the HEAD is detached, no forge remote
+branch has no request, the only request comes from a stranger's fork, the request
+was merged/closed on the default branch, the HEAD is detached, no forge remote
 exists, or the CLI fails. Stale data is never shown; a failed lookup clears the
 line and backs off.
 
@@ -49,7 +49,7 @@ the Σ runtime from `pi-execution-time` (`zz-execution-time-total`):
    | Forge | Command |
    |-------|---------|
    | GitLab | `glab api 'projects/:fullpath'` → `default_branch` |
-   | GitHub | `gh repo view --json nameWithOwner,defaultBranchRef` |
+   | GitHub | `gh repo view --json defaultBranchRef` and `gh config get -h github.com user` (a local config read, no network) |
 3. The request is queried when the branch changes or every 60s (20s CLI timeout):
 
    | Forge | Command |
@@ -66,9 +66,12 @@ the Σ runtime from `pi-execution-time` (`zz-execution-time-total`):
      before selection. `master` is a popular branch name, so forks open PRs/MRs
      against this repository from their own `master`; that branch says nothing
      about this checkout. GitLab compares `source_project_id` with
-     `target_project_id`, GitHub compares `headRepository.nameWithOwner` with the
-     repository `gh` resolved to (case-insensitive). A missing id, a deleted fork
-     or an unknown local repository keeps the request.
+     `target_project_id`. GitHub keeps a pull request whose head repository is
+     one of this checkout's GitHub remotes (from `git config`, so an upstream
+     `origin` plus the user's fork as a second remote covers both) or is a fork
+     owned by the signed-in `gh` user — contributing from a fork is the normal
+     way to open a pull request upstream. A missing id, a deleted fork or an
+     unknown local repository keeps the request.
    - **History on the default branch**: when HEAD is on the default branch, a
      merged or closed request is not shown — an old `master → master` sync would
      otherwise sit in the footer forever. On any other branch a merged request

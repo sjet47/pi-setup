@@ -75,6 +75,42 @@ export function detectForge(urls: string[]): Forge | undefined {
 	return hosts.some(isGithubHost) ? "github" : undefined;
 }
 
+/** `owner/name` of a remote URL, lowercased; undefined when the path is unreadable. */
+function remoteRepoPath(url: string): string | undefined {
+	const trimmed = url.trim();
+	const path = trimmed.includes("://")
+		? (() => {
+				try {
+					return new URL(trimmed).pathname;
+				} catch {
+					return undefined;
+				}
+			})()
+		: /^[^:/]+:([^:]+)$/.exec(trimmed)?.[1];
+	if (path === undefined) return undefined;
+	const cleaned = path.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\.git$/i, "");
+	return cleaned === "" ? undefined : cleaned.toLowerCase();
+}
+
+/**
+ * Repositories this checkout knows about, from its GitHub remotes.
+ *
+ * A fork of an upstream project pushes its branch to `origin` … or to a second
+ * remote that mirrors the fork: whichever it is, the request's head repository
+ * has to be one of them. A fork the checkout has never heard of (`master` is a
+ * popular branch name) merely shares the name.
+ */
+export function githubRemoteRepos(urls: string[]): string[] {
+	const repos = new Set<string>();
+	for (const url of urls) {
+		const host = remoteHost(url);
+		if (host === undefined || !isGithubHost(host)) continue;
+		const path = remoteRepoPath(url);
+		if (path !== undefined) repos.add(path);
+	}
+	return [...repos];
+}
+
 // ── CLI invocations ──────────────────────────────────────────────────────
 
 /**
@@ -102,7 +138,7 @@ export const GITHUB_PR_FIELDS = "number,title,state,isDraft,statusCheckRollup,ur
 export const GITLAB_PROJECT_PATH = "projects/:fullpath";
 
 /** `gh repo view --json` fields. Keep in sync with `githubRepoInfo`. */
-export const GITHUB_REPO_FIELDS = "nameWithOwner,defaultBranchRef";
+export const GITHUB_REPO_FIELDS = "defaultBranchRef";
 
 /**
  * `glab api` path for one commit. Used as the CI fallback: self-hosted GitLab
@@ -121,22 +157,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * What the local checkout knows about itself. A by-branch lookup cannot express
- * the two repository-level facts needed to reject look-alike requests, so they
- * are probed once per working directory (see `gitlabRepoInfo`/`githubRepoInfo`).
+ * the repository-level facts needed to reject look-alike requests, so they are
+ * probed once per working directory (see `githubRemoteRepos`/`githubRepoInfo`).
  */
 export interface CheckoutInfo {
 	/** Branch HEAD is on. */
 	branch: string;
 	/** The repository's default branch, when the forge reports one. */
 	defaultBranch?: string;
-	/** `owner/name` of the GitHub repository the CLI resolves to. */
-	repo?: string;
+	/** `owner/name` of every GitHub remote, lowercased. */
+	repos?: readonly string[];
+	/** GitHub login of the signed-in user, lowercase; a pull request from this user's own fork is still this branch's. */
+	login?: string;
 }
 
-/** Repository-level facts; every field is absent when the probe failed. */
+/** Repository-level facts from the forge; absent when the probe failed. */
 export interface RepoInfo {
 	defaultBranch?: string;
-	repo?: string;
+	/** GitHub login of the user `gh` is signed in as. */
+	login?: string;
 }
 
 /** `glab api projects/:fullpath` → the project's default branch. */
@@ -146,16 +185,18 @@ export function gitlabRepoInfo(payload: unknown): RepoInfo {
 	return typeof branch === "string" && branch !== "" ? { defaultBranch: branch } : {};
 }
 
-/** `gh repo view --json nameWithOwner,defaultBranchRef` → repo identity and default branch. */
+/** `gh repo view --json defaultBranchRef` → the default branch of the repo `gh` resolved. */
 export function githubRepoInfo(payload: unknown): RepoInfo {
 	if (!isRecord(payload)) return {};
-	const info: RepoInfo = {};
-	if (typeof payload.nameWithOwner === "string" && payload.nameWithOwner !== "") {
-		info.repo = payload.nameWithOwner;
-	}
 	const ref = isRecord(payload.defaultBranchRef) ? payload.defaultBranchRef : undefined;
-	if (typeof ref?.name === "string" && ref.name !== "") info.defaultBranch = ref.name;
-	return info;
+	const branch = ref?.name;
+	return typeof branch === "string" && branch !== "" ? { defaultBranch: branch } : {};
+}
+
+/** `gh config get -h github.com user` → the login, when the CLI has one recorded. */
+export function githubLogin(stdout: string): string | undefined {
+	const login = stdout.trim().toLowerCase();
+	return login === "" ? undefined : login;
 }
 
 /**
@@ -182,12 +223,35 @@ function fromThisGitlabProject(mr: Record<string, unknown>): boolean {
 	return source === target;
 }
 
-function fromThisGithubRepo(pr: Record<string, unknown>, repo: string | undefined): boolean {
-	if (repo === undefined) return true;
+/**
+ * Owner of a pull request's head repository, or undefined when the payload does
+ * not name one (the fork was deleted with the branch, or an older `gh`).
+ */
+function githubHeadRepo(pr: Record<string, unknown>): { full: string; owner: string } | undefined {
 	const head = isRecord(pr.headRepository) ? pr.headRepository : undefined;
 	const name = typeof head?.nameWithOwner === "string" ? head.nameWithOwner : undefined;
-	if (name === undefined) return true;
-	return name.toLowerCase() === repo.toLowerCase();
+	if (name === undefined || name === "") return undefined;
+	const full = name.toLowerCase();
+	return { full, owner: full.split("/")[0] ?? full };
+}
+
+/**
+ * Keep pull requests whose head is this checkout's repository (or one of its
+ * remotes), or a fork owned by the signed-in user: contributing from a fork is
+ * the normal way to open a pull request upstream, and that fork is this
+ * branch's. Anything else (`gh pr list --head master` on a popular project
+ * returns strangers' forks) merely shares the branch name.
+ *
+ * Unknown proves nothing, so an unanswered probe keeps the request.
+ */
+function fromThisGithubRepo(pr: Record<string, unknown>, checkout: CheckoutInfo | undefined): boolean {
+	const repos = checkout?.repos;
+	const login = checkout?.login;
+	if (login === undefined && (repos === undefined || repos.length === 0)) return true;
+	const head = githubHeadRepo(pr);
+	if (head === undefined) return true;
+	if (repos?.includes(head.full) === true) return true;
+	return login !== undefined && head.owner === login;
 }
 
 /**
@@ -267,7 +331,7 @@ export function normalizeGithub(payload: unknown, checkout?: CheckoutInfo): MrIn
 	const list = payload
 		.filter(isRecord)
 		.filter((item) => typeof item.number === "number")
-		.filter((item) => fromThisGithubRepo(item, checkout?.repo));
+		.filter((item) => fromThisGithubRepo(item, checkout));
 	if (list.length === 0) return undefined;
 	const pr = pickNewest(list, "state");
 	if (!pr) return undefined;

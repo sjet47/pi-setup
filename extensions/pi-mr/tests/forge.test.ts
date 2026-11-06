@@ -9,6 +9,8 @@ import {
 	gitlabApiPath,
 	gitlabCommitPath,
 	ciFromGitlabCommit,
+	githubLogin,
+	githubRemoteRepos,
 	githubRepoInfo,
 	gitlabRepoInfo,
 	normalizeGithub,
@@ -206,13 +208,36 @@ test("gitlabRepoInfo: the project's default branch, or nothing", () => {
 	assert.deepEqual(gitlabRepoInfo(undefined), {});
 });
 
-test("githubRepoInfo: owner/name and default branch, each optional", () => {
+test("githubRemoteRepos: owner/name of every GitHub remote, lowercased and deduplicated", () => {
+	assert.deepEqual(
+		githubRemoteRepos([
+			"git@github.com:HDT3213/rdb.git",
+			"https://github.com/sjet47/rdb.git",
+			"ssh://git@github.com/sjet47/rdb",
+			"git@git.maxjia.com:sunlinhao/rcman.git",
+			"git@github.com:HDT3213/RDB.git",
+		]),
+		["hdt3213/rdb", "sjet47/rdb"],
+	);
+	assert.deepEqual(githubRemoteRepos([]), []);
+	assert.deepEqual(githubRemoteRepos(["not a url"]), []);
+	// A trailing slash and an uppercase owner are still the same repository.
+	assert.deepEqual(githubRemoteRepos(["https://github.com/Sjet47/Pi-Setup/"]), ["sjet47/pi-setup"]);
+});
+
+test("githubLogin: the recorded login, trimmed and lowercased", () => {
+	assert.equal(githubLogin("sjet47\n"), "sjet47");
+	assert.equal(githubLogin("  Sjet47  "), "sjet47");
+	assert.equal(githubLogin(""), undefined);
+	assert.equal(githubLogin("  \n"), undefined);
+});
+
+test("githubRepoInfo: the default branch of the repository gh resolved", () => {
 	assert.deepEqual(githubRepoInfo({ nameWithOwner: "V4bel/dirtyfrag", defaultBranchRef: { name: "master" } }), {
-		repo: "V4bel/dirtyfrag",
 		defaultBranch: "master",
 	});
-	assert.deepEqual(githubRepoInfo({ nameWithOwner: "V4bel/dirtyfrag", defaultBranchRef: null }), { repo: "V4bel/dirtyfrag" });
-	assert.deepEqual(githubRepoInfo({ defaultBranchRef: { name: "main" } }), { defaultBranch: "main" });
+	assert.deepEqual(githubRepoInfo({ nameWithOwner: "V4bel/dirtyfrag", defaultBranchRef: null }), {});
+	assert.deepEqual(githubRepoInfo({ defaultBranchRef: "" }), {});
 	assert.deepEqual(githubRepoInfo(null), {});
 });
 
@@ -241,19 +266,28 @@ test("normalizeGitlab: drops merge requests whose source is another project", ()
 	assert.equal(normalizeGitlab([gitlabMr({ source_project_id: "1", target_project_id: 1 })])?.ref, "!1234");
 });
 
-test("normalizeGithub: drops pull requests whose head repository is a fork", () => {
-	const checkout = { branch: "master", repo: "V4bel/dirtyfrag" };
+test("normalizeGithub: keeps this checkout's own remotes and own forks, drops strangers", () => {
 	const pr = (number: number, nameWithOwner: unknown) => githubPr({ number, headRepository: { nameWithOwner } });
-	assert.equal(normalizeGithub([pr(80, "Bode512/dirtyfrag")], checkout), undefined);
-	// Matched case-insensitively; the same repository is kept.
-	assert.equal(normalizeGithub([pr(80, "v4bel/DIRTYFRAG")], checkout)?.ref, "#80");
-	assert.equal(normalizeGithub([pr(81, "Bode512/dirtyfrag"), pr(80, "V4bel/dirtyfrag")], checkout)?.ref, "#80");
-	// A deleted fork leaves no head repository, and an unknown local repo has
-	// nothing to compare against: both keep the request.
-	assert.equal(normalizeGithub([githubPr({ number: 80, headRepository: null })], checkout)?.ref, "#80");
-	assert.equal(normalizeGithub([githubPr({ number: 80 })], checkout)?.ref, "#80");
+	// A stranger's fork of a popular project merely shares the branch name.
+	assert.equal(normalizeGithub([pr(80, "Bode512/dirtyfrag")], { branch: "master", repos: ["v4bel/dirtyfrag"] }), undefined);
+	// One of the checkout's remotes: pushes go there, so the branch is this one.
+	assert.equal(normalizeGithub([pr(80, "V4bel/dirtyfrag")], { branch: "master", repos: ["v4bel/dirtyfrag"] })?.ref, "#80");
+	assert.equal(normalizeGithub([pr(80, "v4bel/DIRTYFRAG")], { branch: "master", repos: ["v4bel/dirtyfrag"] })?.ref, "#80");
+	// The signed-in user's own fork, even when the checkout has no remote for it:
+	// contributing from a fork is the normal way to open a pull request upstream.
+	assert.equal(normalizeGithub([pr(61, "sjet47/rdb")], { branch: "feat/x", repos: ["hdt3213/rdb"], login: "sjet47" })?.ref, "#61");
+	// rdb's real shape: upstream `origin` plus the user's fork as `pr`, #61 merged.
+	assert.equal(
+		normalizeGithub([pr(61, "sjet47/rdb")], { branch: "feat/support-opcode-slot-info", repos: ["hdt3213/rdb", "sjet47/rdb"], login: "sjet47" })?.ref,
+		"#61",
+	);
+	// Unknown proves nothing: an unanswered probe keeps every request.
 	assert.equal(normalizeGithub([pr(80, "Bode512/dirtyfrag")], { branch: "master" })?.ref, "#80");
+	assert.equal(normalizeGithub([pr(80, "Bode512/dirtyfrag")], { branch: "master", repos: [] })?.ref, "#80");
 	assert.equal(normalizeGithub([pr(80, "Bode512/dirtyfrag")])?.ref, "#80");
+	// A deleted fork leaves no head repository: keep the request.
+	assert.equal(normalizeGithub([githubPr({ number: 80, headRepository: null })], { branch: "master", login: "sjet47" })?.ref, "#80");
+	assert.equal(normalizeGithub([githubPr({ number: 80 })], { branch: "master", repos: ["v4bel/dirtyfrag"] })?.ref, "#80");
 });
 
 test("normalizeGithub: hides merged/closed only on the default branch", () => {
