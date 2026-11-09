@@ -11,6 +11,7 @@ import {
 	deleteTopic,
 	formatBytes,
 	listMemoryFiles,
+	loadMeta,
 	loadTopics,
 	readTopicBody,
 	resolveInside,
@@ -230,5 +231,51 @@ test("deleteTopic handles a nested target", () => {
 		assert.deepEqual(deleteTopic(dir, topic), { ok: true });
 		assert.equal(existsSync(join(dir, "sub", "n.md")), false);
 		assert.equal(readFileSync(join(dir, "MEMORY.md"), "utf8"), "");
+	});
+});
+
+test("loadTopics reads each file's frontmatter head for the recall fields", () => {
+	withTempMemory((dir) => {
+		writeFileSync(
+			join(dir, "typed.md"),
+			[
+				"---",
+				"name: typed",
+				"description: 召回说明",
+				"metadata:",
+				"  type: feedback",
+				"  modified: 2026-11-05T03:07:43.147Z",
+				"---",
+				"",
+				"body",
+				"",
+			].join("\n"),
+			"utf8",
+		);
+		writeFileSync(join(dir, "plain.md"), "no frontmatter here\n", "utf8");
+		writeFileSync(join(dir, "MEMORY.md"), "- [Typed](typed.md) — h\n- [Plain](plain.md) — h\n", "utf8");
+		const byName = new Map(loadTopics(dir).map((topic) => [topic.file, topic]));
+		assert.equal(byName.get("typed.md")?.type, "feedback");
+		assert.equal(byName.get("typed.md")?.description, "召回说明");
+		assert.equal(byName.get("typed.md")?.modifiedMs, Date.parse("2026-11-05T03:07:43.147Z"));
+		assert.equal(byName.get("plain.md")?.type, undefined);
+		// No frontmatter: the mtime is still the "last maintained" answer.
+		assert.equal(byName.get("plain.md")?.modifiedMs, byName.get("plain.md")?.mtimeMs);
+	});
+});
+
+test("loadMeta skips MEMORY.md and non-markdown files, and degrades on a bad read", () => {
+	withTempMemory((dir) => {
+		writeFileSync(join(dir, "MEMORY.md"), "---\nname: index\n---\n", "utf8");
+		writeFileSync(join(dir, "notes.txt"), "---\nname: txt\n---\n", "utf8");
+		writeFileSync(join(dir, "ok.md"), "---\nname: ok\ndescription: d\n---\n", "utf8");
+		const files = listMemoryFiles(dir);
+		const meta = loadMeta(dir, files);
+		assert.ok(meta !== undefined);
+		assert.equal(meta.has("MEMORY.md"), false);
+		assert.equal(meta.has("notes.txt"), false);
+		assert.equal(meta.get("ok.md")?.frontmatter?.description, "d");
+		// No listing: no metadata at all, which is what a vanished dir looks like.
+		assert.equal(loadMeta(dir, undefined), undefined);
 	});
 });

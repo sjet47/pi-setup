@@ -25,13 +25,28 @@ import {
 	type KeyId,
 	type MarkdownTheme,
 } from "@earendil-works/pi-tui";
-import { splitFrontmatter, topicMatchText, type MemoryTopic } from "./memory-index.ts";
+import { splitFrontmatter, parseModified, topicMatchText, type MemoryTopic } from "./memory-index.ts";
 import { byteLength, formatBytes, resolveInside, type MemoryBody, type MemoryMutationResult } from "./memory-store.ts";
 
 /** Width of the selection cursor prefix (`› `). */
 const CURSOR_WIDTH = 2;
 /** Keep at least this much room for the title before showing the meta column. */
 const MIN_TITLE_WIDTH = 10;
+/**
+ * Width of the `metadata.type` cell in the list: the longest type name
+ * (`reference`). A fixed width keeps the titles aligned whether or not the
+ * visible rows carry a type.
+ */
+const TYPE_COLUMN_WIDTH = 9;
+/** Gap between the type cell and the title. */
+const TYPE_GAP = 2;
+/**
+ * Below this content width the title wins and the type cell is dropped: a
+ * 9-column tag plus its gap costs more than the distinguishing part of a title.
+ */
+const MIN_CONTENT_WIDTH_FOR_TYPE = 48;
+/** Description rows in the detail header; the rest is summarised with `…`. */
+const MAX_DESCRIPTION_LINES = 2;
 
 /** Lines that are never part of the scrolling body: 3 above, 4 below. */
 export const CHROME_LINES = 7;
@@ -107,6 +122,9 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 	private notice?: Notice;
 	/** An editor round trip is in flight; ignore a second Enter. */
 	private editing = false;
+	/** Detail-header metadata rows rendered this pass; they shrink the body. */
+	private metaRows: string[] = [];
+	private metaRowsWidth?: number;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 	private _focused = false;
@@ -140,6 +158,9 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		if (this.cachedWidth === width && this.cachedLines) return this.cachedLines;
 
 		const contentWidth = Math.max(1, width - 2);
+		// Metadata rows come first: they are part of the chrome, so the body height
+		// depends on how many of them fit.
+		this.metaRows = this.level === "detail" ? this.detailMetaLines(contentWidth) : [];
 		const bodyHeight = this.bodyHeight();
 		const detailLines = this.level === "detail" ? this.detailLines(contentWidth) : [];
 		const body = this.level === "detail"
@@ -148,10 +169,12 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		const pathRow = this.showPathRow()
 			? [this.line(this.detailPathLine(contentWidth), contentWidth)]
 			: [];
+		const metaRows = this.metaRows.map((row) => this.line(row, contentWidth));
 		const lines = [
 			this.border("top", width),
 			this.line(this.headerLine(contentWidth, detailLines.length), contentWidth),
 			...pathRow,
+			...metaRows,
 			this.separator(contentWidth),
 			...body.map((line) => this.line(line, contentWidth)),
 			this.separator(contentWidth),
@@ -167,6 +190,7 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 	invalidate(): void {
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this.metaRowsWidth = undefined;
 		this.searchInput.invalidate();
 	}
 
@@ -461,7 +485,54 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 	}
 
 	private chromeLines(): number {
-		return this.showPathRow() ? DETAIL_CHROME_LINES : CHROME_LINES;
+		const base = this.showPathRow() ? DETAIL_CHROME_LINES : CHROME_LINES;
+		return base + this.metaRows.length;
+	}
+
+	/**
+	 * Metadata rows above the body in the detail view: one `type · modified` line
+	 * plus the wrapped frontmatter `description`, both read from the file that is
+	 * actually open (not from the listing the list was built from). Rows are
+	 * trimmed to the space the overlay can spare, so a tiny terminal keeps a
+	 * usable body instead of overflowing the frame.
+	 */
+	private detailMetaLines(contentWidth: number): string[] {
+		const detail = this.detail;
+		if (detail === undefined || !detail.body.ok) return [];
+		if (this.metaRowsWidth === contentWidth) return this.metaRows;
+		this.metaRowsWidth = contentWidth;
+
+		const theme = this.options.theme;
+		const frontmatter = splitFrontmatter(detail.body.text).frontmatter;
+		const type = frontmatter?.type;
+		const typeCell = type === undefined
+			? theme.fg("warning", frontmatter === undefined ? "no frontmatter" : "no type")
+			: theme.fg("accent", type);
+		// `metadata.modified` falls back to the file mtime: same question (“when did
+		// anyone last maintain this”), and an old-style file has no stamp.
+		const modifiedMs = parseModified(frontmatter?.modified) ?? detail.topic.mtimeMs;
+		const modified = modifiedMs === undefined
+			? ""
+			: theme.fg("dim", `modified ${formatTimestamp(modifiedMs)} (${formatAge(modifiedMs, this.options.now())})`);
+		const rows = [" " + (modified === "" ? typeCell : `${typeCell} ${theme.fg("dim", "·")} ${modified}`)];
+
+		const description = frontmatter?.description;
+		if (description !== undefined && description !== "") {
+			const wrapped = wrapTextWithAnsi(description, Math.max(1, contentWidth - 2));
+			const clipped = wrapped.slice(0, MAX_DESCRIPTION_LINES);
+			if (wrapped.length > clipped.length) {
+				// Cut to one column short of the budget, then append the ellipsis, so the
+				// marker can never be truncated into a half-glyph.
+				const last = clipped.length - 1;
+				clipped[last] = `${truncateToWidth(clipped[last], Math.max(1, contentWidth - 3), "")}…`;
+			}
+			for (const line of clipped) rows.push(" " + theme.fg("muted", line));
+		}
+
+		// `room` is what is left for metadata once the frame, header, path row and
+		// one body line are paid for — meta must never squeeze the body to nothing.
+		const room = Math.max(0, this.overlayHeight() - CHROME_LINES - (this.showPathRow() ? 1 : 0) - 1);
+		return rows.slice(0, room);
 	}
 
 	private detailPathLine(contentWidth: number): string {
@@ -497,7 +568,7 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 			}
 			body.push(this.topicLine(row.topic, index === this.selectedIndex, contentWidth));
 			if (body.length < bodyHeight && row.topic.hook !== "") {
-				body.push(this.hookLine(row.topic.hook));
+				body.push(this.hookLine(row.topic.hook, contentWidth));
 			}
 		}
 		return pad(body, bodyHeight);
@@ -532,20 +603,22 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 	}
 
 	/**
-	 * Title row: cursor + title on the left, `size · age` right-aligned. The meta
-	 * column is dropped on a narrow overlay so the title keeps enough room; a
-	 * missing file takes the column over with a `missing` marker (it has no
-	 * size/age to show).
+	 * Title row: cursor, `metadata.type` cell, title on the left, `size · age`
+	 * right-aligned. Both side columns yield on a narrow overlay so the title
+	 * keeps enough room; a missing file takes the meta column over with a
+	 * `missing` marker (it has no size/age to show).
 	 */
 	private topicLine(topic: MemoryTopic, selected: boolean, contentWidth: number): string {
 		const theme = this.options.theme;
 		const pending = this.pendingDelete?.file === topic.file;
 		const cursor = selected ? theme.fg("accent", "› ") : "  ";
+		const typeCell = this.showTypeColumn(contentWidth) ? this.typeCell(topic) : "";
 		let meta = this.topicMeta(topic);
 		// Narrow overlay: the title wins over the meta column.
-		if (visibleWidth(meta) > contentWidth - CURSOR_WIDTH - MIN_TITLE_WIDTH) meta = "";
+		const fixed = CURSOR_WIDTH + visibleWidth(typeCell);
+		if (visibleWidth(meta) > contentWidth - fixed - MIN_TITLE_WIDTH) meta = "";
 		const metaWidth = visibleWidth(meta);
-		const titleWidth = Math.max(1, contentWidth - CURSOR_WIDTH - metaWidth - (metaWidth > 0 ? 2 : 0));
+		const titleWidth = Math.max(1, contentWidth - fixed - metaWidth - (metaWidth > 0 ? 2 : 0));
 		// Truncate before styling: keep the width math free of ANSI nesting.
 		const clipped = truncateToWidth(topic.title, titleWidth, "…");
 		const title = pending
@@ -553,8 +626,27 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 			: selected
 				? theme.fg("accent", theme.bold(clipped))
 				: clipped;
-		const gap = Math.max(1, contentWidth - CURSOR_WIDTH - visibleWidth(title) - metaWidth);
-		return `${cursor}${title}${meta === "" ? "" : " ".repeat(gap) + meta}`;
+		const gap = Math.max(1, contentWidth - fixed - visibleWidth(title) - metaWidth);
+		return `${cursor}${typeCell}${title}${meta === "" ? "" : " ".repeat(gap) + meta}`;
+	}
+
+	/**
+	 * The `metadata.type` cell, padded to a fixed width so titles stay aligned.
+	 * Shown only when some visible topic has a type and the overlay is wide
+	 * enough: a memory dir written by an older agent has no frontmatter at all and
+	 * would otherwise pay for a permanently empty column.
+	 */
+	private showTypeColumn(contentWidth: number): boolean {
+		return (
+			contentWidth >= MIN_CONTENT_WIDTH_FOR_TYPE &&
+			this.topics.some((topic) => topic.type !== undefined)
+		);
+	}
+
+	private typeCell(topic: MemoryTopic): string {
+		const label = topic.type ?? "";
+		const padded = label.padEnd(TYPE_COLUMN_WIDTH) + " ".repeat(TYPE_GAP);
+		return topic.type === undefined ? padded : this.options.theme.fg("dim", padded);
 	}
 
 	/** Right-hand meta column text, already styled; "" when there is nothing to show. */
@@ -566,8 +658,12 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		return theme.fg("dim", text);
 	}
 
-	private hookLine(hook: string): string {
-		return `    ${this.options.theme.fg("dim", hook)}`;
+	private hookLine(hook: string, contentWidth: number): string {
+		// The hook sits under the title, not under the type cell.
+		const indent = this.showTypeColumn(contentWidth)
+			? CURSOR_WIDTH + TYPE_COLUMN_WIDTH + TYPE_GAP
+			: 4;
+		return `${" ".repeat(indent)}${this.options.theme.fg("dim", hook)}`;
 	}
 
 	private sectionLine(row: Extract<Row, { kind: "section" }>, contentWidth: number): string {
@@ -678,6 +774,17 @@ export function formatAge(mtimeMs: number, nowMs: number): string {
 	const years = Math.floor(days / 365);
 	// 360-364 days is still "12mo": switching to years there would print "0y".
 	return years < 1 ? `${Math.floor(days / 30)}mo` : `${years}y`;
+}
+
+/**
+ * Absolute `YYYY-MM-DD HH:MM` in local time, for the detail metadata row. The
+ * list shows a relative age (glanceable); the detail view shows the date itself
+ * (quotable), with the relative age beside it for continuity.
+ */
+export function formatTimestamp(ms: number): string {
+	const date = new Date(ms);
+	const pad = (value: number) => String(value).padStart(2, "0");
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 /** `1 topic` / `2 topics` — 0 takes the plural form. */

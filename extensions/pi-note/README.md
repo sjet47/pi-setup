@@ -26,25 +26,47 @@ every invocation, so memories written after `session_start` show up immediately
 
 ```
 ╭──────────────────────────────────────────────────────────────────╮
-│ Memory · ~/repo/pi-setup                          3 topics       │
-│ ──────────────────────────────────────────────────────────────── │
-│ › Computer use 路线决策                          623 B · now      │
-│     因 Hyprland 不支持双 seat，首版明确采用真实桌面单 seat。      │
-│   插件管理分工                                    688 B · 9mo     │
-│     settings.json 已负责多机同步；pi-setup 收编小插件源码。       │
-│   Deleted                                         missing        │
-│ ── unindexed (1) ──────────────────────────────────────────────  │
-│   draft-notes.md                                  12 B · 1mo     │
-│ ──────────────────────────────────────────────────────────────── │
-│ Search: draft                                                     │
-│ ↑↓ navigate · Enter open · Ctrl+D delete · Esc close                  │
+│Memory · ~/repo/pi-setup                                  4 topics│
+│──────────────────────────────────────────────────────────────────│
+│› project    插件管理分工                              688 B · 9mo│
+│             settings.json 已负责多机同步；收编小插件源码。       │
+│  feedback   TUI 外观改动的验收分工                    1.2 KB · 3d│
+│             说清改了什么 + 单测跑绿就停，别连跑 tmux 抓屏。      │
+│  Deleted                                                  missing│
+│── unindexed (1) ─────────────────────────────────────────────    │
+│  draft-notes.md                                        12 B · 1mo│
+│──────────────────────────────────────────────────────────────────│
+│Search: draft                                                     │
+│↑↓ navigate · Enter open · Ctrl+D delete · Esc close              │
 ╰──────────────────────────────────────────────────────────────────╯
 ```
 
-- **Level 1** — one row per `MEMORY.md` line (title as link text, hook as the
-  dim second line), fuzzy-filtered over title, file name and hook as you type.
-  Memory files that no index line points at are listed under `unindexed` — such
-  a file is invisible to every future session, so it is worth seeing.
+Detail view:
+
+```
+╭──────────────────────────────────────────────────────────────────╮
+│插件管理分工                                      12 lines · 688 B│
+│ …/projects/-home-sjet-repo-pi-setup/memory/plugin-managem…       │
+│ project · modified 2026-11-09 04:28 (7h)                         │
+│ pi-setup 只收编小插件源码，不接管独立社区插件的安装、版本…       │
+│──────────────────────────────────────────────────────────────────│
+│ pi-setup 的用途是收编社区小插件和用户自写插件，统一安装和        │
+│ 维护其 **源码**。独立安装的社区插件继续留在 Pi packages 列表…    │
+│──────────────────────────────────────────────────────────────────│
+│ **Why:** 用户的 Pi settings.json 已纳入版本管理，多机同步已解决。│
+│──────────────────────────────────────────────────────────────────│
+│ lines 1-4 of 12                                                  │
+│ ↑↓ scroll · PgUp/PgDn page · Enter edit · Esc back               │
+╰──────────────────────────────────────────────────────────────────╯
+```
+
+- **Level 1** — one row per `MEMORY.md` line (`metadata.type` tag, title as link
+  text, hook as the dim second line), fuzzy-filtered over title, file name, hook,
+  type and `description` as you type. The type tag is a fixed 9-column cell so
+  titles line up, and is dropped when no memory has one or the overlay is too
+  narrow to afford it. Memory files that no index line points at are listed under
+  `unindexed` — such a file is invisible to every future session, so it is worth
+  seeing.
 - **Right-hand column** — `size · age` (e.g. `623 B · 9mo`), so a memory nobody
   has touched in months stands out. The age is relative on purpose: `9mo` reads
   at a glance where a date does not. A file the index points at but that is not
@@ -54,7 +76,12 @@ every invocation, so memories written after `session_start` show up immediately
 - **Level 2** — `Enter` opens the linked file rendered as markdown,
   scrollable with `↑↓` / `PgUp` / `PgDn` / `Home` / `End` and a line counter in
   the footer. The row under the title is the file's **absolute path** (truncated
-  from the left on a narrow overlay, so the file name stays visible).
+  from the left on a narrow overlay, so the file name stays visible), followed by
+  the recall metadata: `type · modified <date> (<relative age>)` and the wrapped
+  frontmatter `description` (2 rows max). A file without frontmatter says
+  `no frontmatter` there — Claude Code cannot recall it, so it is a defect worth
+  seeing. These rows are chrome and shrink the body; a short terminal drops the
+  description first, then the whole block, never the body's last line.
 - **Editing** — `Enter` in the detail view hands the file to the external
   editor (`settings.json` `externalEditor` → `$VISUAL` → `$EDITOR` → `nano`,
   the same chain pi uses for Ctrl+G), then re-reads it so the rendered body is

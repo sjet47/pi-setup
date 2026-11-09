@@ -181,11 +181,15 @@ metadata:
 
 ### F0 — 记忆浏览（`/memory` 命令，按需）
 
-一级：每行一条 topic（`MEMORY.md` 顺序），标题 + 暗色钩子行，右侧为 `大小 · 年龄` 元信息列（如 `623 B · 9mo`）；输入即模糊过滤（匹配标题 / 文件名 / 钩子）。索引未提到的 `.md` 文件追加在 `unindexed` 分组里——这种文件对未来 session 不可见，得能看见；索引提到但文件不存在的行，元信息列位置显示 `missing`（说明索引已过期）。回车进二级。
+一级：每行一条 topic（`MEMORY.md` 顺序），`metadata.type` 标签 + 标题 + 暗色钩子行，右侧为 `大小 · 年龄` 列（如 `623 B · 9mo`）；输入即模糊过滤（匹配标题 / 文件名 / 钩子 / 类型 / `description`）。索引未提到的 `.md` 文件追加在 `unindexed` 分组里——这种文件对未来 session 不可见，得能看见；索引提到但文件不存在的行，元信息列位置显示 `missing`（说明索引已过期）。回车进二级。
 
-元信息列的设计意图是「一眼发现长期没维护的记忆」：年龄用相对值（`now` / `5m` / `3h` / `12d` / `8mo` / `2y`）而不是绝对日期，`8mo` 略过一眼就能抓住，`2025-01-07` 要停下来换算。`size` 来自 `statSync`，`mtimeMs` 即最后一次编辑时间。嵌套 target（`sub/x.md`）不取统计信息，该列为空；浮层过窄（留给标题不足 `MIN_TITLE_WIDTH`）时整列让位给标题。
+类型标签列固定 9 列宽（最长类型名 `reference`），这样有没有类型的行标题都对齐；钩子行缩进到标题起始列而不是标签列。标签用 `dim`，不与标题争视觉权重。整列在两种情况下让位：目录里没有任何一条带类型（老版本 agent 写的无 frontmatter 目录不该白占一列），或浮层过窄（内容宽 < 48）。
 
-二级：该文件用 markdown 渲染（frontmatter 块在渲染时剥掉——它是召回元数据，不是正文；头部字节数仍按整文件算），`↑↓` / `PgUp` / `PgDn` / `Home` / `End` 滚动，页脚显示行区间；ESC 回一级（搜索词保留），一级 ESC 关浮层，`Ctrl+C` 任意层级直接关。
+`大小 · 年龄` 列的设计意图是「一眼发现长期没维护的记忆」：年龄用相对值（`now` / `5m` / `3h` / `12d` / `8mo` / `2y`）而不是绝对日期，`8mo` 略过一眼就能抓住，`2025-01-07` 要停下来换算。`size` 来自 `statSync`，`mtimeMs` 即最后一次编辑时间。嵌套 target（`sub/x.md`）不取统计信息，该列为空；浮层过窄（留给标题不足 `MIN_TITLE_WIDTH`）时整列让位给标题。
+
+二级：标题行下方先是绝对路径行，然后是元信息行——`type · modified <YYYY-MM-DD HH:MM> (<相对年龄>)`，以及折行后的 frontmatter `description`（最多 2 行，超出用 `…`）。没有 frontmatter 的文件在类型位置显示 `no frontmatter`（warning 色）：这种文件在 Claude Code 侧召不回来，是值得看见的缺陷。元信息行属于 chrome，会压缩正文高度；终端太矮时先丢 description 行、再丢整块元信息，绝不让正文小于 1 行。
+
+正文：该文件用 markdown 渲染（frontmatter 块在渲染时剥掉——它是召回元数据，不是正文；头部字节数仍按整文件算），`↑↓` / `PgUp` / `PgDn` / `Home` / `End` 滚动，页脚显示行区间；ESC 回一级（搜索词保留），一级 ESC 关浮层，`Ctrl+C` 任意层级直接关。
 
 浮层自身高度固定（按终端行数算出，内容在内部滚动）：pi 的 overlay 是**从顶部截断**到 `maxHeight`，`ScrollView` 也只在布局系统驱动下才滚动，所以组件自己算高度、自己切片。每次打开重新读盘，session 内新建的记忆立刻可见。
 
@@ -371,6 +375,7 @@ Before saving, check the index for an existing entry that already covers it. Upd
 - **规则文本组装**：`<MEMORY_DIR>` 被替换、`$PI_NOTE_SCRATCHPAD_DIR` 保留字面量；快照为空时无索引段；未就绪时返回原 system prompt；快照测试锁死规则文本
 - **索引解析**（`test/memory-index.test.ts`）：各种列表写法的解析、去重、外部链接忽略、`.md` 之外的未索引文件不列、缺失文件标记、嵌套 target 不误报；`splitFrontmatter` 读 `metadata.type` 与旧式顶层 `type`、无 frontmatter / 未闭合的文件原样放行
 - **读盘**（`test/memory-store.test.ts`）：临时目录下 `MEMORY.md` + 磁盘文件的合并；目录/索引缺失不抛；`..`、绝对路径被拒；`listMemoryFiles` 的 size/mtime、跳过目录、跟随符号链接、断链不计入（从而读作 missing）
+- **元信息展示**（`test/memory-index.test.ts` / `test/memory-store.test.ts` / `test/browser.test.ts`）：类型标签列的显示与让位、钩子对齐、`metadata.modified` 优先于 mtime、无 frontmatter 的告警、description 折行与 2 行截断、矮终端下元信息行逐级让位且不撑破浮层
 - **浮层**（`test/browser.test.ts`）：桩 theme/keybindings/时钟驱动，断言渲染行数恒等于 `overlayHeight`、每行宽度恒等于面板宽度（含 CJK 与元信息列）、搜索过滤、回车开二级、ESC 分层、缺失文件错误态、滚动到底 clamp、超窄宽度不抛、元信息列的显示与让位边界、`formatAge` 各档位（含 360-364 天必须是 `12mo` 而非 `0y`、时钟偏移到未来不得出现负年龄）
 - **轮间补报**（`test/refresh.test.ts`）：外部写入被报、无变化不报、`touch` 不报、本轮自身写入下一轮不报、注入未送达时基线不推进且下一轮重报、索引删除/重建、行数/行长/内容三档预算、读取不稳定跳过（注入假 `probe`）、`deliveredRefreshIds` 只认本插件的 custom message
 - **设置**（`test/settings.test.ts`）：文件缺失/JSON 坏/非对象均用默认值；只有显式 `false` 关刷新；上限类型不对回落默认

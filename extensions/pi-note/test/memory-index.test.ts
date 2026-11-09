@@ -7,6 +7,7 @@ import {
 	buildTopics,
 	normalizeLink,
 	parseIndex,
+	parseModified,
 	removeIndexEntry,
 	splitFrontmatter,
 	stripHook,
@@ -160,6 +161,7 @@ test("splitFrontmatter reads Claude Code's nested metadata.type and strips the b
 		name: "ask-behavior-not-tech",
 		description: "问可见行为，不问技术选型",
 		type: "feedback",
+		modified: "2026-11-05T03:07:43.147Z",
 	});
 	assert.equal(doc.body, "\n正文第一行");
 });
@@ -178,4 +180,55 @@ test("splitFrontmatter leaves frontmatter-free files untouched", () => {
 	assert.deepEqual(splitFrontmatter(unclosed), { body: unclosed });
 	// A rule later in the body must not be mistaken for the block's end.
 	assert.equal(splitFrontmatter("hello\n---\nname: x\n---\n").frontmatter, undefined);
+});
+
+test("buildTopics merges the frontmatter type/description/modified onto its rows", () => {
+	const meta = new Map([
+		[
+			"typed.md",
+			{
+				frontmatter: { name: "typed", description: "召回说明", type: "feedback", modified: "2026-11-05T03:07:43.147Z" },
+				modifiedMs: Date.parse("2026-11-05T03:07:43.147Z"),
+			},
+		],
+		["plain.md", { frontmatter: undefined }],
+	]);
+	const topics = buildTopics(
+		"- [Typed](typed.md) — hook\n- [Plain](plain.md) — hook\n",
+		[file("typed.md", 10, 5_000), file("plain.md", 20, 9_000), file("orphan.md", 30, 7_000)],
+		meta,
+	);
+	const [typed, plain, orphan] = topics;
+	assert.equal(typed.type, "feedback");
+	assert.equal(typed.description, "召回说明");
+	// `metadata.modified` wins over the file mtime…
+	assert.equal(typed.modifiedMs, Date.parse("2026-11-05T03:07:43.147Z"));
+	// …and the mtime is the fallback for a file without a stamp.
+	assert.equal(plain.type, undefined);
+	assert.equal(plain.description, undefined);
+	assert.equal(plain.modifiedMs, 9_000);
+	// An unindexed file gets the same treatment (it is listed the same way).
+	assert.equal(orphan.modifiedMs, 7_000);
+});
+
+test("parseModified accepts ISO stamps and rejects anything unparsable", () => {
+	assert.equal(parseModified("2026-11-05T03:07:43.147Z"), Date.parse("2026-11-05T03:07:43.147Z"));
+	assert.equal(parseModified(" 2026-11-05 "), Date.parse("2026-11-05"));
+	assert.equal(parseModified(undefined), undefined);
+	assert.equal(parseModified("   "), undefined);
+	assert.equal(parseModified("not a date"), undefined);
+});
+
+test("topicMatchText also matches the recall fields, so both tools find the same memories", () => {
+	const topic = {
+		title: "T",
+		file: "t.md",
+		hook: "h",
+		indexed: true,
+		exists: true,
+		type: "feedback",
+		description: "问可见行为",
+	};
+	assert.equal(topicMatchText(topic).includes("feedback"), true);
+	assert.equal(topicMatchText(topic).includes("可见行为"), true);
 });

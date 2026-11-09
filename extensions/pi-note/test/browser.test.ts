@@ -179,8 +179,9 @@ test("every level renders exactly the overlay height", () => {
 	assert.equal(lines().length, height);
 	overlay.handleInput(ENTER);
 	assert.equal(lines().length, height);
-	// The detail view spends one more row on the path, one less on the body.
-	assert.equal(height - DETAIL_CHROME_LINES, 10);
+	// The detail view spends one more row on the path and one on the metadata
+	// row (`no frontmatter · modified <date>`), so the body loses two.
+	assert.equal(height - DETAIL_CHROME_LINES - 1, 9);
 });
 
 test("typing filters topics by title, file and hook", () => {
@@ -262,20 +263,20 @@ test("detail scrolling follows the file and clamps at the end", () => {
 	const { overlay, render } = harness({
 		topics: sampleTopics(),
 		bodies: { "alpha.md": list },
-		rows: 24, // body height 10 (the detail view spends a row on the path)
+		rows: 24, // body height 9: path row + metadata row are chrome
 	});
 	overlay.handleInput(ENTER);
 	assert.match(render(), /LINE-01/);
-	assert.match(render(), /lines 1-10 of 60/);
+	assert.match(render(), /lines 1-9 of 60/);
 
 	for (let press = 0; press < 20; press += 1) overlay.handleInput(PAGE_DOWN);
 	const bottom = render();
 	assert.match(bottom, /LINE-60/);
 	assert.doesNotMatch(bottom, /LINE-01/);
-	assert.match(bottom, /lines 51-60 of 60/);
+	assert.match(bottom, /lines 52-60 of 60/);
 
 	for (let press = 0; press < 5; press += 1) overlay.handleInput(PAGE_DOWN);
-	assert.match(render(), /lines 51-60 of 60/);
+	assert.match(render(), /lines 52-60 of 60/);
 });
 
 test("an index line whose file is gone is marked and reports the error", () => {
@@ -575,4 +576,119 @@ test("a very short overlay still renders a usable single-line body", () => {
 test("a too-narrow render does not throw", () => {
 	const { overlay } = harness({ topics: sampleTopics() });
 	assert.deepEqual(overlay.render(2).length, 1);
+});
+
+// === metadata (Claude Code frontmatter) ===============================
+
+/** A topic list whose files carry the frontmatter fields Claude Code writes. */
+function typedTopics(): MemoryTopic[] {
+	const meta = new Map([
+		["alpha.md", { frontmatter: { name: "alpha", description: "Alpha 的召回说明", type: "feedback" } }],
+		["beta.md", { frontmatter: { name: "beta", description: "Beta 的召回说明", type: "reference" } }],
+	]);
+	return buildTopics(
+		"- [Alpha](alpha.md) — first memory\n- [Beta](beta.md) — second memory\n",
+		[file("MEMORY.md", 50), file("alpha.md", 2048), file("beta.md", 900, 400 * DAY_MS)],
+		meta,
+	);
+}
+
+const TYPED_BODY = (type: string, description: string) =>
+	["---", "name: x", `description: ${description}`, "metadata:", `  type: ${type}`, "---", "", "Body line", ""].join("\n");
+
+test("list shows the metadata.type cell, aligned, with the hook under the title", () => {
+	const { render } = harness({
+		topics: typedTopics(),
+		bodies: { "alpha.md": TYPED_BODY("feedback", "Alpha 的召回说明"), "beta.md": TYPED_BODY("reference", "Beta 的召回说明") },
+	});
+	const lines = render().split("\n");
+	const alphaRow = lines.find((line) => line.includes("Alpha"));
+	const hookRow = lines.find((line) => line.includes("first memory"));
+	assert.ok(alphaRow !== undefined && hookRow !== undefined);
+	// `› feedback` + padding + title; the cell is a fixed 9 columns wide.
+	assert.match(alphaRow, /› feedback +Alpha/);
+	assert.match(render(), /│  reference +Beta/);
+	// The hook starts under the title, not under the type cell.
+	assert.equal(hookRow.indexOf("first memory"), alphaRow.indexOf("Alpha"));
+});
+
+test("the type cell is dropped when no topic has one, and on a narrow overlay", () => {
+	const plain = harness({ topics: sampleTopics() });
+	// No metadata at all: titles keep their old position, no empty column.
+	assert.match(plain.render(), /› Alpha {2,}/);
+
+	const typed = harness({ topics: typedTopics() });
+	assert.match(typed.render(), /› feedback/);
+	// 44 columns: the 11-column cell would eat more than the title can afford.
+	const narrow = typed.overlay.render(44).join("\n");
+	assert.doesNotMatch(narrow, /feedback/);
+	assert.match(narrow, /› Alpha/);
+});
+
+test("detail shows type, modified date and the wrapped description", () => {
+	const { overlay, render } = harness({
+		topics: typedTopics(),
+		bodies: {
+			"alpha.md": [
+				"---",
+				"name: alpha",
+				"description: 第一行说明足够长到需要换行展示，因为这条记忆的召回描述确实写得很详细而且不能丢",
+				"metadata:",
+				"  type: feedback",
+				"  modified: 2026-11-05T03:07:43.147Z",
+				"---",
+				"",
+				"Body line",
+				"",
+			].join("\n"),
+		},
+	});
+	overlay.handleInput(ENTER);
+	const screen = render();
+	assert.match(screen, /feedback/);
+	assert.match(screen, /modified 2026-11-05/);
+	assert.match(screen, /第一行说明/);
+	// The frontmatter block itself never reaches the body.
+	assert.doesNotMatch(screen, /name: alpha/);
+});
+
+test("a description longer than the two allowed rows is clipped with an ellipsis", () => {
+	const long = "很长的召回描述".repeat(30);
+	const { overlay, render } = harness({
+		topics: typedTopics(),
+		bodies: { "alpha.md": TYPED_BODY("feedback", long) },
+		rows: 40,
+	});
+	overlay.handleInput(ENTER);
+	const lines = render().split("\n");
+	const descriptionRows = lines.filter((line) => line.includes("很长的召回描述"));
+	assert.equal(descriptionRows.length, 2);
+	assert.match(descriptionRows[1], /…/);
+	// Never a doubled marker from truncating an already-appended ellipsis.
+	assert.doesNotMatch(descriptionRows[1], /……/);
+});
+
+test("a memory without frontmatter says so in the detail header", () => {
+	const { overlay, render } = harness({
+		topics: sampleTopics(),
+		bodies: { "alpha.md": "plain body, no frontmatter\n" },
+	});
+	overlay.handleInput(ENTER);
+	assert.match(render(), /no frontmatter · modified /);
+});
+
+test("metadata rows yield to the body on a short terminal instead of overflowing", () => {
+	const body = TYPED_BODY("feedback", "说明");
+	for (const rows of [24, 14, 9]) {
+		const { overlay, lines } = harness({
+			topics: typedTopics(),
+			bodies: { "alpha.md": body },
+			rows,
+		});
+		overlay.handleInput(ENTER);
+		const rendered = lines();
+		// The frame never grows past the overlay height, whatever the rows cost.
+		assert.ok(rendered.length <= overlayHeight(rows), `rows=${rows} rendered ${rendered.length}`);
+		assert.ok(rendered.length >= CHROME_LINES + 1);
+	}
 });
