@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { memoryRootFor } from "../git-root.ts";
-import { slugForCwd } from "../paths.ts";
+import { claudeSlugFor } from "../paths.ts";
 
 // Hermetic git: ignore the machine's own global/system config, and set the
 // identity inline so a missing user.email cannot fail the fixture commit.
@@ -47,7 +47,7 @@ test("main checkout and its linked worktree resolve to the same root", () => {
 		assert.equal(memoryRootFor(root), resolve(root));
 		assert.equal(memoryRootFor(worktree), resolve(root));
 		// The point of the whole exercise: one memory dir per repository.
-		assert.equal(slugForCwd(memoryRootFor(worktree)), slugForCwd(root));
+		assert.equal(claudeSlugFor(memoryRootFor(worktree)), claudeSlugFor(root));
 	} finally {
 		rmSync(tmp, { recursive: true, force: true });
 	}

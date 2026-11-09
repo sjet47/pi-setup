@@ -18,7 +18,7 @@ test("first run creates memory dir, empty MEMORY.md and a 0700 scratchpad", () =
 	const agentDir = tmpAgentDir();
 	const tmpBase = mkdtempSync(join(tmpdir(), "pi-note-tmp-"));
 	try {
-		const p = resolvePaths(agentDir, "/home/sjet/repo/pi-setup", SESSION_ID, {
+		const p = resolvePaths({ configDir: agentDir }, "/home/sjet/repo/pi-setup", SESSION_ID, {
 			tmpDir: tmpBase,
 			uid: 1000,
 		});
@@ -48,7 +48,7 @@ test("existing memory is picked up as the snapshot on a later start", () => {
 	const agentDir = tmpAgentDir();
 	const tmpBase = mkdtempSync(join(tmpdir(), "pi-note-tmp-"));
 	try {
-		const p = resolvePaths(agentDir, "/home/sjet/repo/pi-setup", SESSION_ID, {
+		const p = resolvePaths({ configDir: agentDir }, "/home/sjet/repo/pi-setup", SESSION_ID, {
 			tmpDir: tmpBase,
 			uid: 1000,
 		});
@@ -79,12 +79,12 @@ test("two sessions share the memory dir but keep separate scratchpads", () => {
 	const agentDir = tmpAgentDir();
 	const tmpBase = mkdtempSync(join(tmpdir(), "pi-note-tmp-"));
 	try {
-		const p1 = resolvePaths(agentDir, "/home/sjet/repo/pi-setup", SESSION_ID, {
+		const p1 = resolvePaths({ configDir: agentDir }, "/home/sjet/repo/pi-setup", SESSION_ID, {
 			tmpDir: tmpBase,
 			uid: 1000,
 		});
 		const p2 = resolvePaths(
-			agentDir,
+			{ configDir: agentDir },
 			"/home/sjet/repo/pi-setup",
 			"99999999-0000-4000-8000-000000000000",
 			{ tmpDir: tmpBase, uid: 1000 },
@@ -107,12 +107,12 @@ test("init failure when the memory dir path is blocked by a regular file (US-9)"
 	const agentDir = tmpAgentDir();
 	const tmpBase = mkdtempSync(join(tmpdir(), "pi-note-tmp-"));
 	try {
-		const p = resolvePaths(agentDir, "/home/sjet/repo/pi-setup", SESSION_ID, {
+		const p = resolvePaths({ configDir: agentDir }, "/home/sjet/repo/pi-setup", SESSION_ID, {
 			tmpDir: tmpBase,
 			uid: 1000,
 		});
 		// Occupy the memory dir path with a plain file -> mkdir cannot proceed.
-		mkdirSync(join(agentDir, "pi-note"), { recursive: true });
+		mkdirSync(join(agentDir, "projects", "-home-sjet-repo-pi-setup"), { recursive: true });
 		writeFileSync(p.memoryDir, "I am a file, not a dir", "utf8");
 
 		assert.throws(() => prepareSession(p.memoryDir, p.scratchDir));
@@ -126,7 +126,7 @@ test("re-running prepareSession is idempotent (fork/reload re-enter)", () => {
 	const agentDir = tmpAgentDir();
 	const tmpBase = mkdtempSync(join(tmpdir(), "pi-note-tmp-"));
 	try {
-		const p = resolvePaths(agentDir, "/home/sjet/repo/pi-setup", SESSION_ID, {
+		const p = resolvePaths({ configDir: agentDir }, "/home/sjet/repo/pi-setup", SESSION_ID, {
 			tmpDir: tmpBase,
 			uid: 1000,
 		});

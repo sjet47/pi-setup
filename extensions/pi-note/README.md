@@ -124,7 +124,7 @@ explicit `false` turns the refresh off:
 ## Directory layout
 
 ```
-~/.pi/agent/pi-note/<slug>/          # project memory — shared by every session
+~/.claude/projects/-home-sjet-repo-pi-setup/memory/   # project memory, shared
 ├── MEMORY.md                        # index, one line per memory
 ├── cli-preferences.md
 └── two-clone-workflow.md
@@ -132,11 +132,23 @@ explicit `false` turns the refresh off:
 /tmp/pi-note-<uid>/<session-id>/     # session scratchpad, mode 0700
 ```
 
-- `<slug>` mirrors pi's session-dir naming for the project cwd, e.g.
-  `--home-sjet-repo-pi-setup--`. The cwd is first normalized to the **git root**
-  (`git rev-parse --git-common-dir`), so every `git worktree` of one repository
-  shares the main checkout's memory dir instead of getting a private one.
-  Outside a repository the cwd is used as-is.
+- The memory dir **is Claude Code's auto-memory dir**, not a pi-note-owned one:
+  `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<claude-slug>/memory`. Claude Code,
+  pi and dsh therefore read and write the same files, and the file format is
+  Claude Code's (frontmatter `name` / `description` / `metadata.type`, see
+  "Memory format" below). Resolution lives in `paths.ts` (pure slug math) and
+  `claude-memory.ts` (env + Claude Code's `settings.json`):
+  1. `<claude-slug>` = the directory with every character outside
+     `[A-Za-z0-9]` replaced by `-` (case kept), e.g.
+     `-home-sjet-repo-pi-setup`; past 200 characters a `-<base36>` suffix is
+     appended, exactly like Claude Code, so both sides always agree;
+  2. the input is first normalized to the **git root**
+     (`git rev-parse --git-common-dir`), so every `git worktree` of one
+     repository shares the main checkout's memory dir — the same key Claude
+     Code uses; outside a repository the cwd is used as-is;
+  3. `$CLAUDE_CONFIG_DIR` and Claude Code's `autoMemoryDirectory` user setting
+     are mirrored; cowork/remote memory env vars and `autoMemoryEnabled` are
+     not (they would mean splitting the two tools silently).
 - `<uid>` is the numeric OS user id, so separate users of one machine never
   collide in the world-writable `/tmp`.
 - `<session-id>` is pi's globally-unique session UUID. `/fork`/`/clone` start a
@@ -148,18 +160,32 @@ The memory dir is only ever created by `session_start`. Memories are plain
 markdown files; `/memory` browses them and can delete one (file + index line),
 nothing else manages them.
 
-## Moving the memory dir (symlink)
+## Memory format
 
-Memory is meant to stay on the local machine, but if you want it elsewhere —
-another disk, or a dotfiles checkout — just replace the dir with a symlink.
-The plugin only ever `mkdir -p`'s and reads/writes files under the path, so a
-symlink to an existing target is honored as-is:
+One file per topic, named after its frontmatter `name`
+(`ask-behavior-not-tech.md`), plus the `MEMORY.md` index with one
+`- [Title](file.md) — hook` line per memory. Claude Code selects memories by
+the frontmatter, so pi-note writes it too:
 
-```bash
-# move existing memory somewhere else, then link it back
-mv ~/.pi/agent/pi-note ~/dotfiles/pi-note-memory
-ln -s ~/dotfiles/pi-note-memory ~/.pi/agent/pi-note
+```markdown
+---
+name: ask-behavior-not-tech
+description: Ask frontend decisions as visible behavior, never as implementation choices
+metadata:
+  type: feedback
+---
+Ask about behavior ("clicking Save should keep the dialog open"), not about
+routing or composables.
+
+**Why:** implementation words make the user pick a design they did not ask for.
+**How to apply:** every frontend decision question, before writing code.
 ```
+
+`metadata.type` is one of `user` / `feedback` / `project` / `reference`;
+`feedback` and `project` bodies lead with the rule, then `**Why:**` and
+`**How to apply:**`. `/memory` renders the body with the frontmatter block
+stripped (`memory-index.ts` `splitFrontmatter`), while the header byte count is
+the whole file.
 
 This does **not** touch `~/dotfiles/pi-agent/pi-hermes-memory/` (a different
 plugin's store) — pi-note neither reads, writes, nor migrates it.

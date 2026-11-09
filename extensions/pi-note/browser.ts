@@ -25,7 +25,7 @@ import {
 	type KeyId,
 	type MarkdownTheme,
 } from "@earendil-works/pi-tui";
-import { topicMatchText, type MemoryTopic } from "./memory-index.ts";
+import { splitFrontmatter, topicMatchText, type MemoryTopic } from "./memory-index.ts";
 import { byteLength, formatBytes, resolveInside, type MemoryBody, type MemoryMutationResult } from "./memory-store.ts";
 
 /** Width of the selection cursor prefix (`› `). */
@@ -517,12 +517,15 @@ export class MemoryBrowserOverlay implements Component, Focusable {
 		detail.scrollTop = clamp(detail.scrollTop, 0, maxScroll);
 		return pad(all.slice(detail.scrollTop, detail.scrollTop + bodyHeight), bodyHeight);
 	}
-	/** Markdown lines for the detail view, cached per width. */
+	/** Markdown lines for the detail view, cached per width. The frontmatter block
+	 *  is Claude Code's recall metadata, not content: it is stripped here so the
+	 *  rendered body stays readable (`bytes` in the header still counts the file). */
 	private detailLines(contentWidth: number): string[] {
 		const detail = this.detail;
 		if (!detail || !detail.body.ok) return [];
 		if (detail.linesWidth === contentWidth) return detail.lines;
-		const markdown = new Markdown(detail.body.text, 0, 0, this.options.markdownTheme);
+		const text = splitFrontmatter(detail.body.text).body;
+		const markdown = new Markdown(text, 0, 0, this.options.markdownTheme);
 		detail.lines = markdown.render(Math.max(1, contentWidth));
 		detail.linesWidth = contentWidth;
 		return detail.lines;

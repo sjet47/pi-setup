@@ -10,7 +10,7 @@ pi 每次 `/new` 或重启都从零开始：用户的偏好、踩过的坑、项
 
 同时 pi 没有约定的临时文件工作区。agent 产出中间脚本、调试输出时，要么污染项目目录，要么散落在 `/tmp` 根下互相覆盖。
 
-pi-note 把 Claude Code 的两个机制移植到 pi：**文件式记忆**（每条记忆一个文件 + 一份索引）和**会话级 scratchpad 目录**。
+pi-note 把 Claude Code 的两个机制移植到 pi：**文件式记忆**（每条记忆一个文件 + 一份索引）和**会话级 scratchpad 目录**。记忆目录不复刻一份，而是直接用 Claude Code 的 auto-memory 目录——Claude Code 和 pi / dsh 写着同一批文件，三家共用一套记忆（D4）。
 
 **非目标**：
 
@@ -19,7 +19,7 @@ pi-note 把 Claude Code 的两个机制移植到 pi：**文件式记忆**（每�
 - 不替代 `AGENTS.md`。`AGENTS.md` 是团队共享的项目约定，记忆是本机私有的个人化事实。
 - 不做全局记忆层。记忆仅项目级。
 - 不接管 `~/dotfiles/pi-agent/pi-hermes-memory/` 的数据（另一个插件的存储，本插件不读不写不迁移）。
-- 不提供查看/管理记忆的命令、工具或配置项。记忆就是普通 markdown 文件；要搬迁目录用 symlink；要禁用从 `package.json` 里移除入口。
+- 不提供记忆目录的搬迁/镜像配置。目录由 Claude Code 的规则算出来（D4），跟着它走才不会分裂；要禁用从 `package.json` 里移除入口。
 - 不做 scratchpad 过期清理。本机 `/tmp` 是 tmpfs，且 `tmpfiles.d/tmp.conf` 配置了 10 天自动清理。
 
 ## 2. 插件职责
@@ -79,15 +79,23 @@ D2 里「不用 message 注入」的顾虑仍然成立（消息会持久化、�
 
 不注册 `memory_write` 之类的工具。多一个工具就多一份 schema 常驻上下文，且格式演进要改代码。规则文本改一行字就能调整行为。代价是格式一致性靠模型自觉，规则文本里给出模板来降低漂移。
 
-### D4：项目 slug 复用 pi 的 session 目录命名规则
+### D4：记忆目录就是 Claude Code 的 auto-memory 目录
 
-从 `ctx.sessionManager.getCwd()` 按 pi 的规则算 slug（`session-manager.js` 的 `getDefaultSessionDirPath`，未导出，自行复刻那一行正则）：解析为绝对路径，去掉开头的 `/`，`/` `\` `:` 替换为 `-`，前后各加 `--`。结果与 `~/.pi/agent/sessions/` 下的目录名一致（如 `--home-sjet-repo-pi-setup--`）。
+记忆不再是 pi-note 自有目录，而是 Claude Code 的 auto-memory 目录：
 
-**不要**用 `basename(getSessionDir())`：`--no-session` 时 sessionDir 是空串，所有 ephemeral session 会串到同一个记忆目录。
+```
+<CLAUDE_CONFIG_DIR 或 ~/.claude>/projects/<claude-slug>/memory/
+```
 
-记忆根目录用 `getAgentDir()`（包入口已导出）拼接，不硬编码 `~/.pi/agent`。
+规则来自 Claude Code 2.1.319 的实现（`paths.ts` 复刻，逐条对齐）：
 
-#### D4.1：slug 的输入是 git 主 worktree，不是裸 cwd
+1. 基目录 `$CLAUDE_CONFIG_DIR`，未设时 `~/.claude`（`claude-memory.ts`）。
+2. `claude-slug` = 工作目录里所有 `[A-Za-z0-9]` 之外的字符替换成 `-`，**保留大小写、不折叠连续 `-`**；超过 200 字符时截断并追加 `-<base36>`，哈希是 Java 风格 `hashCode` 取绝对值。
+3. 用户设置里的 `autoMemoryDirectory` 一旦设置，Claude Code 就不再按项目分目录，那个目录对所有项目生效；此时 pi-note 也直接用那一个目录（只认 `<configDir>/settings.json` 里的用户级设置，`~/` 前缀展开）。
+
+为什么不反过来让 Claude Code 指向 pi 的目录：`autoMemoryDirectory` 是**单一静态路径**，`projectSettings` 里明确被忽略，也无法按项目模板化，做不到「每个项目指向自己的目录」。所以只能 pi/dsh 跟着 Claude Code 的默认路径走。
+
+### D4.1：slug 的输入是 git 主 worktree，不是裸 cwd
 
 `git worktree add` 让一个仓库有多个工作目录。若直接用裸 cwd 算 slug，每个 worktree 各得一个记忆目录，同一项目的事实被拆散且互相不可见。因此 `session_start` 先用 `memoryRootFor(cwd)`（`extensions/pi-note/git-root.ts`）把 cwd 归一到仓库根：
 
@@ -95,11 +103,26 @@ D2 里「不用 message 注入」的顾虑仍然成立（消息会持久化、�
 git rev-parse --path-format=absolute --git-common-dir
 ```
 
-- 结果 basename 为 `.git` 时取 `dirname`：主 worktree 与它所有 linked worktree 共享这一个目录。主 checkout 的 slug 不变（`/repo/.git` → `/repo`），所以既有记忆目录无需迁移。
+- 结果 basename 为 `.git` 时取 `dirname`：主 worktree 与它所有 linked worktree 共享这一个目录。
 - 其余形态（submodule 的 gitdir、`--separate-git-dir`、bare repo）无法安全反推根，返回 cwd 原值，退化为「一个目录一个记忆」，而不是把不相关的项目合并到一起。
 - 任何失败（git 不存在、cwd 不在仓库里、git < 2.31 不认 `--path-format`）同样退化为 cwd，不抛错、不中断 `session_start`。
 
-必须带 `--path-format=absolute`：在子目录里 git 只打印 `.git`，拿它和 cwd 拼接会得到错的路径。
+这与 Claude Code 的键一致：它内存目录用的也是 git canonical root（`defaultKey = canonicalWcRootForProject ?? gitRoot ?? project`），实测 `~/.claude/projects/` 下每个 linked worktree 的项目目录都只有 transcript、没有 `memory/`，`memory/` 只挂在主 checkout 的目录里。
+
+### D4.2：哪些 Claude Code 开关**不**镜像
+
+| 开关 | 处理 | 理由 |
+|---|---|---|
+| `CLAUDE_CONFIG_DIR` | 镜像 | 不跟就会写到 Claude Code 不读的地方 |
+| `autoMemoryDirectory`（userSettings） | 镜像 | 同上；设了它就等于全局单目录 |
+| `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE`、`CLAUDE_CODE_REMOTE_MEMORY_DIR` | 不镜像 | cowork / 云 session 模式，pi 不跑在那里 |
+| `autoMemoryEnabled: false`、会话内「暂停记忆」 | 不镜像 | Claude Code 的开关不该静默关掉 pi 的记忆 |
+
+残余风险：若哪天设了上表后半段的开关，Claude Code 会停止读写该目录，而 pi 继续写——两边静默分裂。`/memory` 二级底部显示文件绝对路径，是发现这类分裂最快的入口。
+
+### D4.3：迁移（一次性，2026-11-09）
+
+旧目录 `~/.pi/agent/pi-note/<pi-slug>/` 保留不动（不删任何一侧），由 Claude Code 会话读旧的 `MEMORY.md` 与文件，把仍然有用的结论按本规范重新写进 Claude Code 的 memory 目录（不脚本批量复制：旧数据没有 frontmatter/description，机械搬运会把没有 description 的记忆带进来，召回质量反而变差）。pi-slug 反推真实路径不唯一（`_` 与 `-` 都保留在 pi-slug 里而 Claude Code 会压平），迁移脚本靠磁盘上真实存在的路径反查。
 
 ### D5：scratchpad 每 session 一个目录
 
@@ -108,25 +131,42 @@ sessionId 由 `ctx.sessionManager.getSessionId()` 给出，任何 session（含 
 ## 4. 目录布局
 
 ```
-~/.pi/agent/pi-note/<slug>/          # 记忆目录（<slug> 由 git 主 worktree 算出，见 D4.1）
-├── MEMORY.md                        # 索引，每条记忆一行
+~/.claude/projects/-home-sjet-repo-pi-setup/memory/   # 记忆目录（Claude Code 的 auto-memory 目录，见 D4）
+├── MEMORY.md                                        # 索引，每条记忆一行
 ├── cli-preferences.md
 └── two-clone-workflow.md
 
-/tmp/pi-note-<uid>/<session-id>/     # scratchpad，权限 0700
+/tmp/pi-note-<uid>/<session-id>/                     # scratchpad，权限 0700
 ```
 
 ## 5. 记忆文件格式
 
 ### 5.1 单条记忆
 
-一个文件一个可独立更新的主题，文件名 kebab-case `.md`。**没有 frontmatter**，正文就是普通 markdown：
-
-记忆只放跨会话仍成立的事实与决策；生命周期更短的内容（进行中状态、草稿、中间结果、一次性脚本、命令输出、日志）一律写 scratchpad，不写进记忆目录。
+一个文件一个可独立更新的主题，文件名是 frontmatter `name` 的 kebab-case slug + `.md`。格式与 Claude Code 一致（同一批文件两边都读），frontmatter 里的字段就是 Claude Code 召回时匹配的字段：
 
 ```markdown
+---
+name: cli-preferences
+description: 命令行任务默认工具：jq 解析 JSON、glab 处理 GitLab，不做前置检查
+metadata:
+  type: feedback
+---
 用 `jq` 解析 JSON，用 `glab` 处理 GitLab 任务（不预检版本/登录态，直接执行，报错再处理）。
+
+**Why:** 前置检查反复消耗一轮往返，真正的问题在命令输出里就能看到。
+**How to apply:** 任何 GitLab / JSON 相关命令都直接执行。
 ```
+
+规则（`prompt.ts` 的 §7 文本）：
+
+1. `name`：kebab-case，与文件名去掉 `.md` 一致。
+2. `description`：一行、说明这个文件回答什么问题；缺失或含糊会让记忆召不回来。
+3. `metadata.type`：`user` / `feedback` / `project` / `reference` 之一；`feedback` 与 `project` 的正文写成「结论 → **Why:** → **How to apply:**」。
+4. `metadata.modified`：有 ISO 时间就写，没有就省（召回退回文件 mtime）。
+5. 正文里用 `[[name]]` 链相关记忆；单个文件控制在 4 KB 以内（召回只读文件开头）。
+
+记忆只放跨会话仍成立的事实与决策；生命周期更短的内容（进行中状态、草稿、中间结果、一次性脚本、命令输出、日志）一律写 scratchpad，不写进记忆目录。
 
 ### 5.2 索引 MEMORY.md
 
@@ -145,7 +185,7 @@ sessionId 由 `ctx.sessionManager.getSessionId()` 给出，任何 session（含 
 
 元信息列的设计意图是「一眼发现长期没维护的记忆」：年龄用相对值（`now` / `5m` / `3h` / `12d` / `8mo` / `2y`）而不是绝对日期，`8mo` 略过一眼就能抓住，`2025-01-07` 要停下来换算。`size` 来自 `statSync`，`mtimeMs` 即最后一次编辑时间。嵌套 target（`sub/x.md`）不取统计信息，该列为空；浮层过窄（留给标题不足 `MIN_TITLE_WIDTH`）时整列让位给标题。
 
-二级：该文件用 markdown 渲染，`↑↓` / `PgUp` / `PgDn` / `Home` / `End` 滚动，页脚显示行区间；ESC 回一级（搜索词保留），一级 ESC 关浮层，`Ctrl+C` 任意层级直接关。
+二级：该文件用 markdown 渲染（frontmatter 块在渲染时剥掉——它是召回元数据，不是正文；头部字节数仍按整文件算），`↑↓` / `PgUp` / `PgDn` / `Home` / `End` 滚动，页脚显示行区间；ESC 回一级（搜索词保留），一级 ESC 关浮层，`Ctrl+C` 任意层级直接关。
 
 浮层自身高度固定（按终端行数算出，内容在内部滚动）：pi 的 overlay 是**从顶部截断**到 `maxHeight`，`ScrollView` 也只在布局系统驱动下才滚动，所以组件自己算高度、自己切片。每次打开重新读盘，session 内新建的记忆立刻可见。
 
@@ -193,13 +233,37 @@ read / write / edit / grep / find / ls 等工具不经过 shell。插件在 `too
 
 You have a persistent file-based memory for this project at `<MEMORY_DIR>`. This directory already exists — write to it directly. Do not run mkdir and do not check whether it exists.
 
-Memory is what a future session on this project needs so it does not repeat a mistake, redo work, or work out again what has already been found. Each memory is one markdown file holding one topic that can be updated on its own, named `<short-kebab-case-slug>.md`, no frontmatter. Worth saving: pitfalls you hit and how to get past them (a tool's non-obvious behavior, a command that silently returns wrong results, an approach that turned out not to work); findings that took real effort and would otherwise have to be rediscovered (how a system or API actually behaves, where something lives, which approach works); important decisions and constraints, with the why, that the code and git history do not show (convert relative dates to absolute); guidance the user has given on how you should work, with the why; who the user is (role, expertise, preferences); pointers to external resources (URLs, dashboards, tickets).
+Claude Code reads and writes the same directory in the same format, and so do other pi and dsh sessions on this machine: another agent may have created, edited or deleted a memory since you last looked. Re-read a file before rewriting it, and never rewrite `MEMORY.md` from memory — read it, change your line, and write the whole file back.
 
-Write a memory as the conclusion — what is true, what to do or avoid, and why — not as a record of what happened. Memory is not a log: no running records, per-run results, progress notes or timelines. When a topic changes, rewrite its conclusion in place instead of appending entries. Work state that a later session has to pick up (progress, next steps) belongs in the project's own files, such as a handoff or plan document, not in memory; this session's artifacts belong in the scratchpad.
+Memory is what a future session on this project needs so it does not repeat a mistake, redo work, or work out again what has already been found. Each memory is one markdown file holding one topic that can be updated on its own, named after its frontmatter `name`: a kebab-case slug, so `ask-behavior-not-tech.md`.
 
-After writing the file, add a one-line pointer in `<MEMORY_DIR>/MEMORY.md`: `- [Title](file.md) — hook`, where the hook is a short phrase (under ~150 characters) saying when the memory is relevant. One line per memory, never put memory content there.
+Every memory file starts with frontmatter — recall selects on these fields, so do not skip them:
+
+```
+---
+name: ask-behavior-not-tech
+description: Ask frontend decisions as visible behavior, never as implementation choices
+metadata:
+  type: feedback
+---
+```
+
+1. `name` — the kebab-case slug, identical to the file name without `.md`.
+2. `description` — one specific line (well under 150 characters) saying what question this file answers. Recall matches on it: a missing or vague description makes the memory unfindable.
+3. `metadata.type` — exactly one of:
+   1. `user` — who the user is: role, expertise, preferences.
+   2. `feedback` — guidance about how to work, both corrections and approaches the user confirmed. Body: the rule or fact first, then `**Why:**` (the reason or the incident behind it) and `**How to apply:**` (when it kicks in).
+   3. `project` — ongoing work, goals, constraints, decisions that neither the code nor git history shows. Same `**Why:**` / `**How to apply:**` body. Convert relative dates ("last Thursday") to absolute ones.
+   4. `reference` — pointers to external resources: URLs, dashboards, tickets.
+4. `metadata.modified` — an ISO timestamp, only when you have one; recall falls back to the file's mtime.
+
+Link related memories in the body with `[[name]]`; a link to a `name` that does not exist yet is fine, it marks something worth writing later. Keep each memory file well under 4 KB including frontmatter — recall reads only the head of a file, so split or summarize a memory that outgrows that rather than letting it grow.
+
+After writing the file, add a one-line pointer in `<MEMORY_DIR>/MEMORY.md`: `- [Title](file.md) — hook`, where the hook is a short phrase (under ~150 characters) saying when the memory is relevant. One line per memory, never put memory content there, and no frontmatter in the index.
 
 Writing a memory file and updating this index are one atomic step: never create, rename, or delete a memory file without adding, fixing, or removing its `MEMORY.md` line in the same turn. A memory file with no index line is invisible to future sessions — the index snapshot is the only recall path.
+
+Write a memory as the conclusion — what is true, what to do or avoid, and why — not as a record of what happened. Memory is not a log: no running records, per-run results, progress notes or timelines. When a topic changes, rewrite its conclusion in place instead of appending entries. Work state that a later session has to pick up (progress, next steps) belongs in the project's own files, such as a handoff or plan document, not in memory; this session's artifacts belong in the scratchpad.
 
 The index is included below as a snapshot taken at session start. When a line looks relevant to the task at hand, read that file before acting on the topic; do not guess at its contents from the hook. Memories you write during this session will not appear in the snapshot; read `<MEMORY_DIR>/MEMORY.md` directly when you need the authoritative current list, and after context compaction before acting on past agreements.
 
@@ -300,11 +364,12 @@ Before saving, check the index for an existing entry that already covers it. Upd
 
 按 `AGENTS.md` 的测试原则（纯逻辑层单测，mock pi 事件层，临时目录用 `mkdtempSync`）：
 
-- **路径解析**：给定 cwd 和 sessionId，产出的 slug 与 `~/.pi/agent/sessions/` 下的目录名一致，记忆目录 / scratchpad 目录正确
+- **路径解析**（`test/paths.test.ts`）：`claudeSlugFor` 与 `~/.claude/projects/` 下真实目录名一致（`_` 压成 `-`、`--` 包裹不存在）、200 字符截断加 base36 后缀、`autoMemoryDirectory` 覆盖项目分目录、给定 cwd 与 sessionId 产出的记忆目录 / scratchpad 目录正确
+- **Claude Code 配置**（`test/claude-memory.test.ts`）：`$CLAUDE_CONFIG_DIR` 优先级、`settings.json` 缺失/坏 JSON/错误类型都退默认、`~/` 展开
 - **git 根归一**：真仓库 + `git worktree add` 的临时仓库里，worktree 及其子目录都归一到主 checkout，slug 等于主 checkout 的 slug；非仓库目录、相对路径、`..` 路径各自退化正确（`test/git-root.test.ts`）
 - **变量展开**：`$PI_NOTE_SCRATCHPAD_DIR/x` 与 `${PI_NOTE_SCRATCHPAD_DIR}/x` 被展开；`$PI_NOTE_SCRATCHPAD_DIR_BACKUP` 不展开；出现在字符串中间不展开；bash 工具参数不展开；无变量的参数原样返回
 - **规则文本组装**：`<MEMORY_DIR>` 被替换、`$PI_NOTE_SCRATCHPAD_DIR` 保留字面量；快照为空时无索引段；未就绪时返回原 system prompt；快照测试锁死规则文本
-- **索引解析**（`test/memory-index.test.ts`）：各种列表写法的解析、去重、外部链接忽略、`.md` 之外的未索引文件不列、缺失文件标记、嵌套 target 不误报
+- **索引解析**（`test/memory-index.test.ts`）：各种列表写法的解析、去重、外部链接忽略、`.md` 之外的未索引文件不列、缺失文件标记、嵌套 target 不误报；`splitFrontmatter` 读 `metadata.type` 与旧式顶层 `type`、无 frontmatter / 未闭合的文件原样放行
 - **读盘**（`test/memory-store.test.ts`）：临时目录下 `MEMORY.md` + 磁盘文件的合并；目录/索引缺失不抛；`..`、绝对路径被拒；`listMemoryFiles` 的 size/mtime、跳过目录、跟随符号链接、断链不计入（从而读作 missing）
 - **浮层**（`test/browser.test.ts`）：桩 theme/keybindings/时钟驱动，断言渲染行数恒等于 `overlayHeight`、每行宽度恒等于面板宽度（含 CJK 与元信息列）、搜索过滤、回车开二级、ESC 分层、缺失文件错误态、滚动到底 clamp、超窄宽度不抛、元信息列的显示与让位边界、`formatAge` 各档位（含 360-364 天必须是 `12mo` 而非 `0y`、时钟偏移到未来不得出现负年龄）
 - **轮间补报**（`test/refresh.test.ts`）：外部写入被报、无变化不报、`touch` 不报、本轮自身写入下一轮不报、注入未送达时基线不推进且下一轮重报、索引删除/重建、行数/行长/内容三档预算、读取不稳定跳过（注入假 `probe`）、`deliveredRefreshIds` 只认本插件的 custom message
@@ -318,7 +383,7 @@ Before saving, check the index for an existing entry that already covers it. Upd
 - [x] 顶层 `package.json` 的 `pi.extensions` 加入口
 - [x] 顶层 `tsconfig.json` 的 `include` 加 `extensions/pi-note`
 - [x] `README.md` 插件表格加一行
-- [x] `extensions/pi-note/README.md`：目录布局、如何 symlink 搬迁记忆目录
+- [x] `extensions/pi-note/README.md`：目录布局（Claude Code auto-memory 目录）
 - [x] `npm run typecheck` 通过、测试通过
 - [x] 按双 clone 流程同步到 `~/.pi/agent/git/.../pi-setup` 后 `/reload` 实测（2026-09-08 通过：env 正确、0700、write 工具变量展开落盘、无 /tmp 路径泄漏）
 - [x] `/memory` 源码（`memory-index.ts` / `memory-store.ts` / `browser.ts`）+ 三个测试文件

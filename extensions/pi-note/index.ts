@@ -22,6 +22,7 @@
 import type { BeforeAgentStartEventResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { SCRATCH_ENV_VAR, memoryRootLabel, resolvePaths } from "./paths.ts";
+import { resolveClaudeMemoryConfig } from "./claude-memory.ts";
 import { memoryRootFor } from "./git-root.ts";
 import { prepareSession } from "./prepare.ts";
 import { buildPromptAppend } from "./prompt.ts";
@@ -50,7 +51,11 @@ export default function piNoteExtension(pi: ExtensionAPI) {
 			// Key memory on the git root, not the raw cwd: every `git worktree`
 			// of one repository shares the main checkout's memory dir (SPEC §3 D4).
 			const root = memoryRootFor(ctx.sessionManager.getCwd());
-			const paths = resolvePaths(getAgentDir(), root, ctx.sessionManager.getSessionId());
+			// Memory dir is Claude Code's auto-memory dir, so pi, Claude Code and dsh
+			// read and write the same files (SPEC §3 D4). Resolved every session
+			// start: `$CLAUDE_CONFIG_DIR` and Claude Code's settings may change.
+			const claude = resolveClaudeMemoryConfig(process.env);
+			const paths = resolvePaths(claude, root, ctx.sessionManager.getSessionId());
 			const prepared = prepareSession(paths.memoryDir, paths.scratchDir);
 			memoryDir = paths.memoryDir;
 			memoryRoot = root;

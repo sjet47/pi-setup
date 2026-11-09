@@ -8,6 +8,7 @@ import {
 	normalizeLink,
 	parseIndex,
 	removeIndexEntry,
+	splitFrontmatter,
 	stripHook,
 	topicMatchText,
 	type MemoryFileInfo,
@@ -139,4 +140,42 @@ test("topicMatchText covers title, file and hook", () => {
 	assert.match(topicMatchText(topic), /插件管理分工/);
 	assert.match(topicMatchText(topic), /plugin-management-boundary\.md/);
 	assert.match(topicMatchText(topic), /settings\.json/);
+});
+
+test("splitFrontmatter reads Claude Code's nested metadata.type and strips the block", () => {
+	const text = [
+		"---",
+		"name: ask-behavior-not-tech",
+		'description: "问可见行为，不问技术选型"',
+		"metadata:",
+		"  node_type: memory",
+		"  type: feedback",
+		"  modified: 2026-11-05T03:07:43.147Z",
+		"---",
+		"",
+		"正文第一行",
+	].join("\n");
+	const doc = splitFrontmatter(text);
+	assert.deepEqual(doc.frontmatter, {
+		name: "ask-behavior-not-tech",
+		description: "问可见行为，不问技术选型",
+		type: "feedback",
+	});
+	assert.equal(doc.body, "\n正文第一行");
+});
+
+test("splitFrontmatter accepts a top-level type (older files) and partial frontmatter", () => {
+	const doc = splitFrontmatter("---\ntype: project\n---\nbody\n");
+	assert.deepEqual(doc.frontmatter, { type: "project" });
+	assert.equal(doc.body, "body\n");
+});
+
+test("splitFrontmatter leaves frontmatter-free files untouched", () => {
+	const plain = "# Notes\n\nno frontmatter here\n";
+	assert.deepEqual(splitFrontmatter(plain), { body: plain });
+	// An unclosed block is not frontmatter either: showing it beats eating the file.
+	const unclosed = "---\nname: x\nbody without a close";
+	assert.deepEqual(splitFrontmatter(unclosed), { body: unclosed });
+	// A rule later in the body must not be mistaken for the block's end.
+	assert.equal(splitFrontmatter("hello\n---\nname: x\n---\n").frontmatter, undefined);
 });
